@@ -89,8 +89,11 @@ class CaptureService : Service() {
         fun stopIntent(context: Context): Intent =
             Intent(context, CaptureService::class.java).setAction(ACTION_STOP)
 
-        /** Turns per-frame lab observations on/off without restarting the stream. */
-        fun labIntent(context: Context, enabled: Boolean, roiBottomY: Int = 0): Intent =
+        /**
+         * Turns per-frame lab observations on/off without restarting the stream.
+         * [roiBottomY]: panel top in screen px, 0 = whole screen, -1 = keep.
+         */
+        fun labIntent(context: Context, enabled: Boolean, roiBottomY: Int = -1): Intent =
             Intent(context, CaptureService::class.java).apply {
                 action = ACTION_LAB_MODE
                 putExtra(EXTRA_LAB, enabled)
@@ -154,8 +157,9 @@ class CaptureService : Service() {
 
             ACTION_LAB_MODE -> {
                 labMode = active && intent.getBooleanExtra(EXTRA_LAB, false)
-                val roi = intent.getIntExtra(EXTRA_ROI_BOTTOM, 0)
-                if (roi > 0 && roi != roiBottomY) {
+                // 0 = butun ekran (avto-kliker), -1 = o'zgartirmaslik.
+                val roi = intent.getIntExtra(EXTRA_ROI_BOTTOM, -1)
+                if (roi >= 0 && roi != roiBottomY) {
                     roiBottomY = roi
                     // Tasma kadr oqimida ishlatiladi: uni o'sha oqimda almashtiramiz,
                     // aks holda kadr yangi tasmani eski detektor bilan o'qishi mumkin.

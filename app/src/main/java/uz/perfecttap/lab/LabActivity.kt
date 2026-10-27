@@ -26,10 +26,8 @@ import uz.perfecttap.capture.LabObservation
 import uz.perfecttap.core.Displays
 import uz.perfecttap.core.RootManager
 import uz.perfecttap.databinding.ActivityLabBinding
-import uz.perfecttap.inject.ShizukuInjector
 import uz.perfecttap.inject.TapChannel
-import uz.perfecttap.inject.TapChannelFactory
-import uz.perfecttap.inject.TouchDeviceFinder
+import uz.perfecttap.inject.TapChannels
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -51,7 +49,6 @@ class LabActivity : AppCompatActivity() {
     private lateinit var correlator: FrameCorrelator
 
     private val root = RootManager()
-    private val finder = TouchDeviceFinder(root)
     private val streamStats = LatencyStats()
     private val inputStats = LatencyStats()
 
@@ -543,22 +540,13 @@ class LabActivity : AppCompatActivity() {
 
     /** Δ_input uchun bosish kanali: avval root (evdev), keyin Shizuku. */
     private suspend fun openTapChannel(): TapChannel? {
-        if (withContext(Dispatchers.IO) { root.isGranted() }) {
-            val device = withContext(Dispatchers.IO) { finder.discover().device }
-            if (device != null) {
-                val size = Displays.size(this@LabActivity)
-                val opened = withContext(Dispatchers.IO) {
-                    TapChannelFactory(root).open(device, size.width, size.height)
-                }
-                opened.channel?.let { return it }
-            }
+        val opened = withContext(Dispatchers.IO) { TapChannels.open(this@LabActivity, root) }
+        when (opened.failure) {
+            TapChannels.Failure.SHIZUKU_DENIED -> inputMessage = R.string.shizuku_denied
+            TapChannels.Failure.SHIZUKU_NOT_RUNNING -> inputMessage = R.string.shizuku_not_running
+            TapChannels.Failure.NONE -> Unit
         }
-        val state = ShizukuInjector.state()
-        if (!state.canInject) {
-            inputMessage = if (state.running) R.string.shizuku_denied else R.string.shizuku_not_running
-            return null
-        }
-        return ShizukuInjector.openTapChannel()
+        return opened.channel
     }
 
     private fun ms(ns: Double): Double = ns / 1_000_000.0

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Qalqib chiquvchi boshqaruv paneli. Kadrda ko'rinadi, shuning uchun ekran
+     tepasida (Y-tahlil hududidan yuqorida) turishi kerak. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="250dp"
+    android:layout_height="wrap_content"
+    android:background="@drawable/overlay_bg"
+    android:orientation="vertical"
+    android:padding="10dp">
+
+    <LinearLayout
+        android:id="@+id/dragHandle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/overlay_title"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/btnClose"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:contentDescription="@string/overlay_close"
+            android:gravity="center"
+            android:text="✕"
+            android:textColor="#C8D0D8"
+            android:textSize="16sp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/overlayStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/overlay_state_idle"
+        android:textColor="#FFFFFF"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/overlayCounters"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:textColor="#A9B4BF"
+        android:textSize="12sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/btnScan"
+            style="@style/OverlayButton"
+            android:text="@string/overlay_scan" />
+
+        <TextView
+            android:id="@+id/btnStart"
+            style="@style/OverlayButton"
+            android:layout_marginStart="6dp"
+            android:text="@string/overlay_start" />
+
+        <TextView
+            android:id="@+id/btnStop"
+            style="@style/OverlayButton"
+            android:layout_marginStart="6dp"
+            android:text="@string/overlay_stop" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/btnWarmup"
+        style="@style/OverlayButton"
+        android:layout_width="match_parent"
+        android:layout_weight="0"
+        android:layout_marginTop="6dp" />
+</LinearLayout>

@@ -7,6 +7,8 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.provider.Settings
+import android.net.Uri
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -30,6 +32,8 @@ import uz.perfecttap.inject.TapChannelFactory
 import uz.perfecttap.inject.TouchDevice
 import uz.perfecttap.inject.TouchDeviceFinder
 import uz.perfecttap.lab.LabActivity
+import uz.perfecttap.auto.OverlayService
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -38,7 +42,7 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         /** Ko'rinadigan bosqich raqami; versiya `versionName` bilan birga oshiriladi. */
-        const val STAGE = "5"
+        const val STAGE = "6"
         const val SHIZUKU_REQUEST_CODE = 1001
     }
 
@@ -56,13 +60,27 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         val data = result.data
         if (result.resultCode != RESULT_OK || data == null) {
+            openPanelAfterConsent = false
             log("Ekran oqimi ruxsati berilmadi")
             return@registerForActivityResult
         }
         log("Ekran oqimi ruxsati olindi — xizmat ishga tushmoqda")
-        val intent = CaptureService.startIntent(this, result.resultCode, data)
+        val auto = openPanelAfterConsent
+        openPanelAfterConsent = false
+        // Avto-kliker butun ekranni kuzatadi (ROI = 0).
+        val intent = CaptureService.startIntent(this, result.resultCode, data, lab = auto, roiBottomY = 0)
         ContextCompat.startForegroundService(this, intent)
+        if (auto) openOverlay()
     }
+
+    /** Ekran oqimi ruxsatidan keyin panel ochilsinmi. */
+    private var openPanelAfterConsent = false
+
+    /** Sessiya faylini foydalanuvchi tanlagan joyga saqlash (SAF). */
+    private var sessionToSave: File? = null
+    private val saveSessionLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri -> if (uri != null) exportSession(uri) }
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -86,6 +104,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnCaptureStop.setOnClickListener {
             startService(CaptureService.stopIntent(this))
         }
+        binding.btnAutoPanel.setOnClickListener { onAutoPanelClicked() }
+        binding.btnSaveLastSession.setOnClickListener { saveLastSession() }
         binding.btnOpenLab.setOnClickListener {
             startActivity(Intent(this, LabActivity::class.java))
         }
@@ -262,6 +282,65 @@ class MainActivity : AppCompatActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             requestProjectionConsent()
+        }
+    }
+
+    /**
+     * Avto-kliker: overlay ruxsati → (bildirishnoma) → ekran oqimi → panel.
+     * Oqim allaqachon ishlayotgan bo'lsa, faqat butun ekran tahliliga o'tadi.
+     */
+    private fun onAutoPanelClicked() {
+        if (!Settings.canDrawOverlays(this)) {
+            log(getString(R.string.overlay_permission_needed))
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            )
+            return
+        }
+        if (CaptureBus.running.value) {
+            startService(CaptureService.labIntent(this, true, 0))
+            openOverlay()
+            return
+        }
+        openPanelAfterConsent = true
+        onStartCaptureClicked()
+    }
+
+    private fun openOverlay() {
+        startService(OverlayService.startIntent(this))
+        log("Avto-kliker paneli ochildi — o'yinga o'ting va «Skanerlash»ni bosing")
+        // Bosish kanalini panel o'zi ochadi; bu yerdagi kanal unga xalaqit bermasin.
+        closeChannel()
+        setBusy(false)
+    }
+
+    /** Eng oxirgi sessiya (lab yoki avto) faylini saqlash. */
+    private fun saveLastSession() {
+        val newest = File(filesDir, "sessions").listFiles { f -> f.extension == "csv" }
+            ?.maxByOrNull { it.lastModified() }
+        if (newest == null) {
+            log(getString(R.string.session_none))
+            return
+        }
+        sessionToSave = newest
+        saveSessionLauncher.launch(newest.name)
+    }
+
+    private fun exportSession(uri: Uri) {
+        val file = sessionToSave ?: return
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val out = contentResolver.openOutputStream(uri) ?: error("fayl ochilmadi")
+                    out.use { stream -> file.inputStream().use { it.copyTo(stream) } }
+                }
+            }
+            log(
+                result.fold(
+                    onSuccess = { getString(R.string.session_saved, file.name) },
+                    onFailure = { getString(R.string.session_save_failed, it.message ?: "?") }
+                )
+            )
         }
     }
 

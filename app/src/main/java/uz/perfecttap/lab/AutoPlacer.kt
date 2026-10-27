@@ -19,7 +19,12 @@ class AutoPlacer(
     private val cooldownNs: Long = 150_000_000L,
     private val maxScheduleNs: Long = 60_000_000L,
     private val maxPredictionNs: Long = 600_000_000L,
-    private val minSpeedPxPerSec: Float = 25f
+    private val minSpeedPxPerSec: Float = 25f,
+    /**
+     * Haqiqiy o'yinda maydon chegaralari noma'lum: true bo'lsa, ular blok
+     * qaytgan joylardan o'rganiladi (labda 6% chekka ma'lum, shuning uchun false).
+     */
+    private val learnPlayfield: Boolean = false
 ) {
 
     /** [scheduleInNs] — qo'yishni shu vaqtdan keyin bajarish kerak (-1 = yo'q). */
@@ -27,7 +32,13 @@ class AutoPlacer(
         val scheduleInNs: Long,
         val predictedCenterX: Float,
         val stackCenterX: Float,
-        val speedPxPerSec: Float
+        val speedPxPerSec: Float,
+        /**
+         * Bashorat chetdan qaytishni o'z ichiga oladi (kadrdan beri blok devorga
+         * urilgan). Qaytish modeli o'yinga mos kelmasa (chetda to'xtash), bu
+         * bashorat bir kadrgacha adashadi.
+         */
+        val throughBounce: Boolean = false
     )
 
     /** Kamera o'lchagan stack markazi (px); o'lchov bo'lmasa NaN. */
@@ -61,7 +72,17 @@ class AutoPlacer(
      */
     private var ignoreContentBeforeNs = Long.MIN_VALUE
 
+    /** Kuzatilgan eng chap / eng o'ng blok qirrasi va qaysi devordan qaytgani. */
+    private var edgeMin = Float.MAX_VALUE
+    private var edgeMax = -Float.MAX_VALUE
+    private var leftWallSeen = false
+    private var rightWallSeen = false
+
     fun reset() {
+        edgeMin = Float.MAX_VALUE
+        edgeMax = -Float.MAX_VALUE
+        leftWallSeen = false
+        rightWallSeen = false
         lastReason = REASON_IDLE
         stackCenterX = Float.NaN
         speedPxPerSec = 0f
@@ -113,6 +134,10 @@ class AutoPlacer(
 
         updateSpeed(contentTimestampNs, centerX)
         observations++
+        if (learnPlayfield) {
+            edgeMin = minOf(edgeMin, centerX - widthPx * 0.5f)
+            edgeMax = maxOf(edgeMax, centerX + widthPx * 0.5f)
+        }
 
         // The frame shows the block where it was at contentTimestampNs; the stream
         // can be hundreds of ms old, so predict forward to the current moment.
@@ -120,8 +145,16 @@ class AutoPlacer(
         // The block reflects off the playfield edges, and the captured frame can be
         // hundreds of ms old, so the straight-line prediction is folded back into
         // the playfield: this survives bounces that happened inside the delay.
-        val lo = screenWidthPx * PLAYFIELD_MARGIN + widthPx * 0.5f
-        val hi = screenWidthPx * (1f - PLAYFIELD_MARGIN) - widthPx * 0.5f
+        val lo = if (learnPlayfield && leftWallSeen) {
+            edgeMin + widthPx * 0.5f
+        } else {
+            screenWidthPx * PLAYFIELD_MARGIN + widthPx * 0.5f
+        }
+        val hi = if (learnPlayfield && rightWallSeen) {
+            edgeMax - widthPx * 0.5f
+        } else {
+            screenWidthPx * (1f - PLAYFIELD_MARGIN) - widthPx * 0.5f
+        }
         val raw = centerX + speedPxPerSec * (ageNs / 1_000_000_000f)
         val folded = fold(raw, lo, hi)
         val predicted = folded.first
@@ -163,7 +196,7 @@ class AutoPlacer(
             return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
         }
         lastReason = REASON_SCHEDULED
-        return Decision(crossingNs, predicted, stackCenterX, speedPxPerSec)
+        return Decision(crossingNs, predicted, stackCenterX, speedPxPerSec, throughBounce = raw != predicted)
     }
 
     /**
@@ -191,6 +224,7 @@ class AutoPlacer(
                 val pairDirection = if (dx > 0f) 1 else -1
                 if (legDirection != 0 && pairDirection != legDirection) {
                     // Bounce: same speed, other direction, new leg.
+                    if (legDirection > 0) rightWallSeen = true else leftWallSeen = true
                     if (speedKnown) speedPxPerSec = -speedPxPerSec
                     sampleCount = 0
                 }

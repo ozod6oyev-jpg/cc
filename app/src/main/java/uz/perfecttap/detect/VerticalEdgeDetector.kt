@@ -32,7 +32,12 @@ class VerticalEdgeDetector(
         val bottomRow: Float,
         val centerRow: Float,
         val heightPx: Float,
-        val peaks: Int
+        val peaks: Int,
+        /**
+         * Blok qadami: shu blok tepasidan ostidagi blok tepasigacha (px). Faqat
+         * [requireBlockBelow] rejimida o'lchanadi, aks holda [heightPx].
+         */
+        val pitchPx: Float = heightPx
     )
 
     private val avg = FloatArray(rows)
@@ -179,7 +184,8 @@ class VerticalEdgeDetector(
                     bottomRow = blockBottom[a],
                     centerRow = (blockTop[a] + blockBottom[a]) * 0.5f,
                     heightPx = heightPx,
-                    peaks = lastPeaks
+                    peaks = lastPeaks,
+                    pitchPx = (blockTop[b] - blockTop[a]) * rowStep
                 )
             }
         }

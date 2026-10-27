@@ -70,6 +70,8 @@ class CaptureService : Service() {
          * «yopishib qolgan» hisoblanadi va bir blok balandlikka suriladi.
          */
         private const val STUCK_FRAMES = 6
+        /** Blok shuncha vaqt ichida siljigan bo'lsa, u kuzatuvda hisoblanadi. */
+        private const val MOVING_LOCK_NS = 400_000_000L
 
         fun startIntent(
             context: Context,
@@ -138,6 +140,16 @@ class CaptureService : Service() {
     private var roiBottomY = 0
     /** Oxirgi marta blok ko'rilgan vaqt; tasmani qayta markazlash uchun. */
     private var lastBlockSeenNs = 0L
+    /**
+     * Butun ekran (avto-kliker) rejimi: blok qadami va balandligi eslab qolinadi.
+     * Harakatlanuvchi blok stack ustida bo'lmaganda tasma uning tagida blok
+     * ko'rmaydi — stack shunda ham `bandCenterY + pitch` da o'lchanadi.
+     */
+    private var autoPitchPx = 0f
+    private var autoHeightPx = 0f
+    /** Harakatlanuvchi blok oxirgi marta joyidan siljigan payt. */
+    private var lastMovingNs = 0L
+
     /** Oxirgi o'lchangan blok markazi va u joyida turgan kadrlar soni. */
     private var lastCenterX = Float.NaN
     private var staticFrames = 0
@@ -253,6 +265,9 @@ class CaptureService : Service() {
         lastPipelineDelayNs = 0
         hasBlock = false
         lastBlockSeenNs = 0L
+        autoPitchPx = 0f
+        autoHeightPx = 0f
+        lastMovingNs = 0L
         lastCenterX = Float.NaN
         staticFrames = 0
         bandLuminance = 0f
@@ -346,11 +361,20 @@ class CaptureService : Service() {
                     val found = vertical.detect(strip.pixels)
                     stripLuminance = vertical.lastMeanLum
                     stripMaxLuminance = vertical.lastMaxLum
-                    if (found != null) {
-                        val center = strip.startY + found.centerRow * strip.rowStep
+                    val center = found?.let { strip.startY + it.centerRow * strip.rowStep } ?: 0f
+                    // Avto rejim: harakatlanuvchi blok kuzatilayotgan bo'lsa, undan
+                    // pastdagi nomzod — stackning o'zi (blok stack ustida emas), rad.
+                    val belowTracked = found != null && wholeScreen() &&
+                        System.nanoTime() - lastMovingNs < MOVING_LOCK_NS &&
+                        center > bandCenterY + autoHeightPx * 0.5f
+                    if (found != null && !belowTracked) {
                         bandCenterY = center.roundToInt().coerceIn(BAND_HEIGHT / 2, bandLimitY())
                         movingBottomY = strip.startY + found.bottomRow * strip.rowStep
                         movingHeightPx = found.heightPx
+                        if (wholeScreen()) {
+                            autoPitchPx = found.pitchPx
+                            autoHeightPx = found.heightPx
+                        }
                     }
                 }
             }
@@ -385,6 +409,7 @@ class CaptureService : Service() {
                     } else {
                         staticFrames = 0
                         lastCenterX = centerNow
+                        lastMovingNs = System.nanoTime()
                     }
                 } else if (labMode &&
                     System.nanoTime() - lastBlockSeenNs > STRIP_RECENTER_NS
@@ -398,10 +423,11 @@ class CaptureService : Service() {
                 // balandda. Kamera stackka «yopishib» qolsa, o'lchov joyida
                 // qotib qoladi — bir blok yuqoridagi qatordan qayta qidiramiz.
                 if (labMode && hasBlock && staticFrames >= STUCK_FRAMES) {
-                    val blockHeight = if (movingHeightPx > 1f) {
-                        movingHeightPx
-                    } else {
-                        BAND_HEIGHT.toFloat()
+                    val blockHeight = when {
+                        // Avto rejim: bloklar orasida tirqish bor — qadam bilan suriladi.
+                        wholeScreen() && autoPitchPx > 1f -> autoPitchPx
+                        movingHeightPx > 1f -> movingHeightPx
+                        else -> BAND_HEIGHT.toFloat()
                     }
                     val shifted = (bandCenterY - blockHeight).roundToInt()
                         .coerceIn(BAND_HEIGHT / 2, bandLimitY())
@@ -436,9 +462,14 @@ class CaptureService : Service() {
                 var stackLeft = 0f
                 var stackRight = 0f
                 val stack = stackDetector
-                if (labMode && stack != null && movingBottomY >= 0f) {
-                    val stackY = (movingBottomY + movingHeightPx * 0.5f).roundToInt()
-                        .coerceIn(BAND_HEIGHT / 2, bandLimitY())
+                val autoStack = wholeScreen() && autoPitchPx > 1f
+                if (labMode && stack != null && (movingBottomY >= 0f || autoStack)) {
+                    val stackY = if (autoStack) {
+                        // Stack statik va harakatlanuvchi blokdan roppa-rosa bir qadam pastda.
+                        (bandCenterY + autoPitchPx).roundToInt()
+                    } else {
+                        (movingBottomY + movingHeightPx * 0.5f).roundToInt()
+                    }.coerceIn(BAND_HEIGHT / 2, bandLimitY())
                     val stackRows = slice.readBand(
                         buffer = plane.buffer,
                         rowStride = plane.rowStride,
@@ -533,6 +564,9 @@ class CaptureService : Service() {
     private fun rebuildLabReaders() {
         val height = imageHeight
         if (imageWidth <= 0 || height <= 0) return
+        // Rejim (lab ↔ butun ekran) almashgan bo'lishi mumkin: o'rganilgan qadam eskirgan.
+        autoPitchPx = 0f
+        autoHeightPx = 0f
         val stripWidth = STRIP_WIDTH
         val rowStep = 2
         val startY = (height * 0.22f).toInt()
@@ -547,6 +581,9 @@ class CaptureService : Service() {
             requireBlockBelow = roiBottomY == 0
         )
     }
+
+    /** ROI = 0: avto-kliker butun ekranda, haqiqiy o'yin ustida. */
+    private fun wholeScreen(): Boolean = roiBottomY == 0
 
     /**
      * Tahlil hududining pastki chegarasi (kadr markazi uchun): panel tepasi

@@ -119,4 +119,57 @@ class GameScreenshotDetectionTest {
         assertEquals(755f, d.right, 10f)
         assertEquals(1321f, d.bandY.toFloat(), 25f)
     }
+
+    /** Skrinshotni ImageReader buferi ko'rinishida yuklaydi (RGBA). */
+    private fun load(file: File): Triple<ByteBuffer, Int, Int> {
+        val image = Class.forName("javax.imageio.ImageIO")
+            .getMethod("read", File::class.java)
+            .invoke(null, file)
+        val type = image.javaClass
+        val w = type.getMethod("getWidth").invoke(image) as Int
+        val h = type.getMethod("getHeight").invoke(image) as Int
+        val pixels = type.getMethod(
+            "getRGB", Int::class.java, Int::class.java, Int::class.java, Int::class.java,
+            IntArray::class.java, Int::class.java, Int::class.java
+        ).invoke(image, 0, 0, w, h, null, 0, w) as IntArray
+        val buffer = ByteBuffer.allocate(w * h * 4).order(ByteOrder.LITTLE_ENDIAN)
+        for (p in pixels) {
+            buffer.put((p ushr 16).toByte())
+            buffer.put((p ushr 8).toByte())
+            buffer.put(p.toByte())
+            buffer.put((p ushr 24).toByte())
+        }
+        buffer.flip()
+        return Triple(buffer, w, h)
+    }
+
+    private fun verticalAt(file: File, centerX: Int): VerticalEdgeDetector.Result? {
+        val (buffer, w, h) = load(file)
+        val band = 41
+        val bandLimit = ((h * 0.95f).toInt() - band / 2).coerceAtLeast(band / 2)
+        val strip = VerticalStripReader(81, 2, (h * 0.22f).toInt(), bandLimit + band / 2)
+        strip.read(buffer, w * 4, 4, centerX, w, h)
+        return VerticalEdgeDetector(81, 2, strip.rows, requireBlockBelow = true)
+            .detect(strip.pixels)
+            ?.let { it.copy(topRow = strip.startY + it.topRow * 2, bottomRow = strip.startY + it.bottomRow * 2) }
+    }
+
+    /**
+     * Haqiqiy avto sessiya kadri (hisob 187): bloklar ensiz (~155 px), harakatlanuvchi
+     * blok (x 762..917) stack (x 572..728) ustida emas. Stack ustunida tasma stack
+     * tepasini va blok qadamini beradi; blok tagida esa hech narsa yo'q — shu holat
+     * uchun CaptureService qadamni eslab qoladi.
+     */
+    @Test
+    fun narrowBlocksAwayFromTheStack() {
+        val file = screenshot("auto-20261027-090159-frame-1.png")
+        val atStack = verticalAt(file, 650)
+        assertNotNull(atStack)
+        atStack!!
+        assertEquals(1240f, atStack.topRow, 6f)
+        assertEquals(1314f, atStack.bottomRow, 6f)
+        assertEquals(86f, atStack.pitchPx, 6f)
+
+        assertEquals(null, verticalAt(file, 840))
+    }
 }

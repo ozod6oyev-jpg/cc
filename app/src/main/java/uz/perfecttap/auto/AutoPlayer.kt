@@ -50,6 +50,8 @@ class AutoPlayer(private val config: Config = Config()) {
         val perfectWidthTolerancePx: Float = 3f,
         /** Skanerlash: shuncha ketma-ket kadr maydon ko'rinishi kerak. */
         val scanFrames: Int = 45,
+        /** Skanerlashda ketma-ket shuncha kadr ko'rinmasa, oyna qaytadan to'planadi. */
+        val scanMaxMisses: Int = 10,
         /** Skanerlashda harakatlanuvchi blok kamida shuncha yurishi kerak. */
         val scanMinTravelPx: Float = 60f,
         /** Skanerlashda stack markazi shundan ortiq tebranmasligi kerak. */
@@ -136,6 +138,7 @@ class AutoPlayer(private val config: Config = Config()) {
     private val scanCenters = FloatArray(config.scanFrames)
     private val scanStacks = FloatArray(config.scanFrames)
     private var scanCount = 0
+    private var scanMisses = 0
     private var scanIndex = 0
 
     // Tapdan oldingi stack (natijani solishtirish uchun) va kutilayotgan natija.
@@ -165,6 +168,10 @@ class AutoPlayer(private val config: Config = Config()) {
     fun scan(warmupNs: Long) {
         this.warmupNs = warmupNs.coerceAtLeast(0L)
         state = State.SCANNING
+        // Yangi sessiya: sanoq noldan (oldingi sessiya hisoblagichi qolmasin).
+        taps = 0
+        perfectCount = 0
+        imperfectCount = 0
         lostNotice = false
         resetScan()
         placer.reset()
@@ -200,6 +207,7 @@ class AutoPlayer(private val config: Config = Config()) {
     private fun resetScan() {
         scanCount = 0
         scanIndex = 0
+        scanMisses = 0
     }
 
     /** Oxirgi o'lchangan natija (bir marta qaytariladi). */
@@ -332,9 +340,12 @@ class AutoPlayer(private val config: Config = Config()) {
 
     private fun onScanFrame(seen: Boolean, center: Float, stackCenter: Float, nowNs: Long) {
         if (!seen) {
-            resetScan()
+            // Bir necha kadrlik uzilish (detektor bir zum adashdi) skanerlashni
+            // boshidan boshlatmaydi; uzoq uzilish — boshlatadi.
+            if (++scanMisses > config.scanMaxMisses) resetScan()
             return
         }
+        scanMisses = 0
         scanCenters[scanIndex] = center
         scanStacks[scanIndex] = stackCenter
         scanIndex = (scanIndex + 1) % config.scanFrames

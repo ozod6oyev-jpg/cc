@@ -45,9 +45,14 @@ class AutoPlacerTest {
     /**
      * A full speed window of steady motion that ends at [endX] at [endMs]:
      * [stepPx] per 25 ms frame (positive = moving right).
+     *
+     * [warmUp] da blok 540 da turadi; supurishning birinchi kadri unga nisbatan
+     * teskari yo'nalishda «sakrashi» mumkin va oyoq qaytishdek qayta boshlanadi.
+     * Shuning uchun oyoqda baribir [AutoPlacer.SAMPLES] namuna qolishi uchun
+     * bitta ortiqcha kadr beriladi.
      */
     private fun AutoPlacer.sweepTo(endX: Float, endMs: Long, stepPx: Float): AutoPlacer.Decision {
-        val last = AutoPlacer.SAMPLES - 1
+        val last = AutoPlacer.SAMPLES
         for (k in 0 until last) observe(endX - stepPx * (last - k), endMs - 25L * (last - k))
         return observe(endX, endMs)
     }

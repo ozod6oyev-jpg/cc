@@ -76,6 +76,8 @@ class CaptureService : Service() {
         private const val EXPECT_SHAPE_NS = 3_000_000_000L
         /** Tasdiqlangan maydonda blok bir kadrda shuncha qadamdan ko'p sakramaydi. */
         private const val MAX_JUMP_PITCHES = 1.5f
+        /** «Yopishib qolish» surilishida yangi blok enining ruxsat etilgan farqi. */
+        private const val SHIFT_WIDTH_TOLERANCE = 0.15f
         /** Kuzatuv yo'qolganda tasma sinab ko'riladigan X nuqtalar (ekran eniga nisbatan). */
         private val SEARCH_X = floatArrayOf(0.5f, 0.35f, 0.65f, 0.2f, 0.8f)
 
@@ -157,6 +159,8 @@ class CaptureService : Service() {
     private var lastMovingNs = 0L
     /** Tagida eni teng stack oxirgi marta o'lchangan payt. */
     private var lastStackMatchNs = 0L
+    /** Oxirgi tasdiqlangan (blok + teng stack) blok eni. */
+    private var autoBlockWidthPx = 0f
 
     /** Oxirgi o'lchangan blok markazi va u joyida turgan kadrlar soni. */
     private var lastCenterX = Float.NaN
@@ -277,6 +281,7 @@ class CaptureService : Service() {
         autoHeightPx = 0f
         lastMovingNs = 0L
         lastStackMatchNs = 0L
+        autoBlockWidthPx = 0f
         lastCenterX = Float.NaN
         staticFrames = 0
         bandLuminance = 0f
@@ -464,7 +469,18 @@ class CaptureService : Service() {
                             imageWidth = image.width,
                             imageHeight = image.height
                         )
-                        if (rowsUp > 0 && edgeDetector.detect(slice.pixels, rowsUp)) {
+                        // Avto rejim: keyingi blok stack bilan bir xil enda (1x1).
+                        // 194525: tasma «+2» yozuviga tushib, u joyida turgani uchun
+                        // qadamma-qadam «PERFECT!» yozuvi va hisob raqamiga
+                        // ko'tarilgan. Solishtirish tasdiqlangan blok eni bilan
+                        // (kuzatilayotgan narsaning o'zi yozuv bo'lishi mumkin).
+                        val refWidth = if (autoBlockWidthPx > 1f &&
+                            System.nanoTime() - lastStackMatchNs < EXPECT_SHAPE_NS
+                        ) autoBlockWidthPx else blockRight - blockLeft
+                        if (rowsUp > 0 && edgeDetector.detect(slice.pixels, rowsUp) &&
+                            (!wholeScreen() ||
+                                abs(edgeDetector.bestWidth - refWidth) <= refWidth * SHIFT_WIDTH_TOLERANCE)
+                        ) {
                             hasBlock = true
                             blockLeft = edgeDetector.bestLeft
                             blockRight = edgeDetector.bestRight
@@ -514,6 +530,7 @@ class CaptureService : Service() {
                         val movingWidth = blockRight - blockLeft
                         if (hasBlock && abs(movingWidth - stack.bestWidth) <= stack.bestWidth * 0.15f) {
                             lastStackMatchNs = System.nanoTime()
+                            autoBlockWidthPx = stack.bestWidth
                         }
                     }
                 }

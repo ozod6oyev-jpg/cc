@@ -12,8 +12,8 @@ android {
         minSdk = 26
         targetSdk = 34
         // Har bosqich: versionCode = bosqich raqami, versionName = 0.<bosqich>.0
-        versionCode = 8
-        versionName = "0.6.5"
+        versionCode = 9
+        versionName = "0.6.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

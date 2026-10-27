@@ -82,6 +82,8 @@ class AutoPlayer(private val config: Config = Config()) {
          * rejadagisi bekor qilinadi.
          */
         val staticCancelFrames: Int = 2,
+        /** Joriy oyoqda shuncha kamera namunasi bo'lmaguncha tap yo'q ([AutoPlacer]). */
+        val minLegSamples: Int = 12,
         /** Natija shuncha vaqtda o'lchanmasa, kutish to'xtatiladi. */
         val resultTimeoutNs: Long = 1_500_000_000L,
         /**
@@ -124,7 +126,11 @@ class AutoPlayer(private val config: Config = Config()) {
         val speedPxPerSec: Float = 0f
     )
 
-    private val placer = AutoPlacer(cooldownNs = config.settleNs, learnPlayfield = true)
+    private val placer = AutoPlacer(
+        cooldownNs = config.settleNs,
+        learnPlayfield = true,
+        minLegSamples = config.minLegSamples
+    )
 
     var state = State.IDLE
         private set

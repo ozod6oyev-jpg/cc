@@ -24,7 +24,14 @@ class AutoPlacer(
      * Haqiqiy o'yinda maydon chegaralari noma'lum: true bo'lsa, ular blok
      * qaytgan joylardan o'rganiladi (labda 6% chekka ma'lum, shuning uchun false).
      */
-    private val learnPlayfield: Boolean = false
+    private val learnPlayfield: Boolean = false,
+    /**
+     * Joriy oyoqda (chetdan chetgacha harakat) shuncha namuna bo'lmaguncha tap
+     * rejalashtirilmaydi. Haqiqiy o'yin oqimida kadr kontenti vaqt belgisidan
+     * 25 ms gacha orqada qoladi: 12+ namunada bashorat xatosi >10 ms bo'lishi
+     * ~1% ga tushadi (194525 sessiyasi qayta o'ynatilganda), 4-8 namunada 4-9%.
+     */
+    private val minLegSamples: Int = 0
 ) {
 
     /** [scheduleInNs] — qo'yishni shu vaqtdan keyin bajarish kerak (-1 = yo'q). */
@@ -56,9 +63,18 @@ class AutoPlacer(
 
     private var prevX = Float.NaN
     private var prevContentNs = 0L
-    private val sampleX = FloatArray(SAMPLES)
-    private val sampleNs = LongArray(SAMPLES)
+    private val sampleX = FloatArray(LEG_WINDOW)
+    private val sampleNs = LongArray(LEG_WINDOW)
     private var sampleCount = 0
+    /** Joriy oyoqdagi jami namunalar (oyna [LEG_WINDOW] bilan cheklanmagan). */
+    private var legSamples = 0
+    /** Shu blokda namuna kamligi uchun o'tkazib yuborilgan oyoqlar. */
+    private var sampleSkips = 0
+    private var samplesBlockedThisLeg = false
+    /** Oyoq namunalari bo'yicha blokning oxirgi namuna paytidagi o'rni (median). */
+    private var anchorX = Float.NaN
+    private val slopes = FloatArray(LEG_WINDOW * (LEG_WINDOW - 1) / 2)
+    private val residuals = FloatArray(LEG_WINDOW)
     /** Tezlik kattaligi shu blok uchun to'liq oyna bo'yicha o'lchangan. */
     private var speedKnown = false
     /** Joriy harakat yo'nalishi (+1 / -1; 0 = hali noma'lum). */
@@ -89,6 +105,10 @@ class AutoPlacer(
         prevX = Float.NaN
         prevContentNs = 0L
         sampleCount = 0
+        legSamples = 0
+        sampleSkips = 0
+        samplesBlockedThisLeg = false
+        anchorX = Float.NaN
         speedKnown = false
         legDirection = 0
         observations = 0
@@ -155,7 +175,11 @@ class AutoPlacer(
         } else {
             screenWidthPx * (1f - PLAYFIELD_MARGIN) - widthPx * 0.5f
         }
-        val raw = centerX + speedPxPerSec * (ageNs / 1_000_000_000f)
+        // Bitta kadrning o'zi emas, oyoqdagi barcha namunalar bo'yicha o'rin:
+        // kadr kontenti vaqt belgisidan orqada qolishi (kadr tashlanishi,
+        // takrorlanishi) bashoratga to'g'ridan-to'g'ri o'tmaydi.
+        val from = if (anchorX.isNaN()) centerX else anchorX
+        val raw = from + speedPxPerSec * (ageNs / 1_000_000_000f)
         val folded = fold(raw, lo, hi)
         val predicted = folded.first
         val direction = folded.second * if (speedPxPerSec < 0f) -1f else 1f
@@ -195,6 +219,12 @@ class AutoPlacer(
             lastReason = if (crossingNs < 0L) REASON_MISSED else REASON_FAR
             return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
         }
+        if (legSamples < requiredLegSamples()) {
+            // O'tish bor, lekin bu oyoqda namuna kam: keyingi o'tish kutiladi.
+            lastReason = REASON_SAMPLES
+            samplesBlockedThisLeg = true
+            return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
+        }
         lastReason = REASON_SCHEDULED
         return Decision(crossingNs, predicted, stackCenterX, speedPxPerSec, throughBounce = raw != predicted)
     }
@@ -206,9 +236,12 @@ class AutoPlacer(
      * A block keeps the same speed until it is placed; at the playfield edge only
      * the direction flips. So the magnitude is fitted over samples of one leg,
      * and a bounce keeps it, flips the sign and starts a new leg from the newest
-     * sample. A fit across a bounce (or across the frame where the block is
-     * clamped to the edge) would mix the two legs and give a wrong, jumping
-     * speed — which in the lab moved the tap by a whole frame.
+     * sample.
+     *
+     * Haqiqiy o'yinda kadr vaqt belgisi kontentdan 25 ms gacha farq qiladi (kadr
+     * tashlanadi yoki takrorlanadi), shuning uchun eng kichik kvadratlar o'rniga
+     * Theil–Sen (juft qiyaliklar medianasi) va o'rin uchun qoldiqlar medianasi
+     * ishlatiladi: bitta adashgan kadr natijani surmaydi.
      */
     private fun updateSpeed(contentTimestampNs: Long, centerX: Float) {
         if (!prevX.isNaN()) {
@@ -217,6 +250,7 @@ class AutoPlacer(
             if (dt > 0.25f) {
                 // Long gap: the motion may have changed in any way.
                 sampleCount = 0
+                legSamples = 0
                 speedKnown = false
                 speedPxPerSec = 0f
                 legDirection = 0
@@ -227,6 +261,16 @@ class AutoPlacer(
                     if (legDirection > 0) rightWallSeen = true else leftWallSeen = true
                     if (speedKnown) speedPxPerSec = -speedPxPerSec
                     sampleCount = 0
+                    legSamples = 0
+                    if (samplesBlockedThisLeg) sampleSkips++
+                    samplesBlockedThisLeg = false
+                } else if (legDirection == 0 && sampleCount > 1) {
+                    // Harakat endi boshlandi: undan oldingi joyida turgan namunalar
+                    // chiziqda emas — oyoq oldingi namunadan boshlanadi.
+                    sampleX[0] = sampleX[sampleCount - 1]
+                    sampleNs[0] = sampleNs[sampleCount - 1]
+                    sampleCount = 1
+                    legSamples = 1
                 }
                 legDirection = pairDirection
                 if (!speedKnown && dt >= 0.004f) speedPxPerSec = dx / dt
@@ -235,60 +279,71 @@ class AutoPlacer(
         prevX = centerX
         prevContentNs = contentTimestampNs
 
-        if (sampleCount < SAMPLES) {
+        if (sampleCount < LEG_WINDOW) {
             sampleX[sampleCount] = centerX
             sampleNs[sampleCount] = contentTimestampNs
             sampleCount++
         } else {
-            for (i in 0 until SAMPLES - 1) {
+            for (i in 0 until LEG_WINDOW - 1) {
                 sampleX[i] = sampleX[i + 1]
                 sampleNs[i] = sampleNs[i + 1]
             }
-            sampleX[SAMPLES - 1] = centerX
-            sampleNs[SAMPLES - 1] = contentTimestampNs
+            sampleX[LEG_WINDOW - 1] = centerX
+            sampleNs[LEG_WINDOW - 1] = contentTimestampNs
         }
+        legSamples++
 
-        if (sampleCount < MIN_FIT_SAMPLES) return
-        val fit = fitVelocity()
-        if (fit == 0f) return
-        // Every sample must sit on the fitted line: an edge-clamped frame or a
-        // mismatched timestamp shows up as a large residual and is not trusted.
-        var worst = 0f
-        for (i in 0 until sampleCount) {
-            val onLine = fitMeanX + fit * ((sampleNs[i] - fitMeanNs) / 1_000_000_000.0).toFloat()
-            worst = maxOf(worst, abs(onLine - sampleX[i]))
+        // Yangi oyoqning dastlabki namunalari kam: avvalgi oyoq tezligi
+        // (ishorasi almashgan) saqlanadi, o'z bahosi yetarli namunada olinadi.
+        val ownFitSamples = if (speedKnown) LEG_REFIT_SAMPLES else SAMPLES
+        if (sampleCount >= ownFitSamples) {
+            val fit = theilSenVelocity()
+            if (fit != 0f) {
+                speedPxPerSec = fit
+                speedKnown = true
+            }
         }
-        if (worst > FIT_TOLERANCE_PX) return
-        if (speedKnown || sampleCount >= SAMPLES) {
-            speedPxPerSec = fit
-            speedKnown = true
-        }
+        anchorX = if (speedKnown && sampleCount >= MIN_FIT_SAMPLES) anchorAt(contentTimestampNs) else Float.NaN
     }
 
-    private var fitMeanNs = 0.0
-    private var fitMeanX = 0f
+    /**
+     * Keng va tez blokda oyoq qisqa: o'tishgacha [minLegSamples] namuna
+     * yig'ilmasligi mumkin. Talab bosqichma-bosqich yumshatiladi: bir o'tish
+     * shu sabab o'tkazilsa — [SAMPLES], yana bittasi — cheklovsiz (faqat tezlik
+     * ma'lum bo'lishi kerak). Aks holda bunday blok hech qachon qo'yilmaydi.
+     */
+    private fun requiredLegSamples(): Int = when {
+        sampleSkips >= 2 -> 0
+        sampleSkips >= 1 -> minOf(minLegSamples, SAMPLES)
+        else -> minLegSamples
+    }
 
-    private fun fitVelocity(): Float {
-        var meanT = 0.0
-        var meanX = 0.0
-        val count = sampleCount
-        for (i in 0 until count) {
-            meanT += sampleNs[i]
-            meanX += sampleX[i]
+    /** Juft qiyaliklar medianasi (px/s); juftlar kamida [MIN_PAIR_DT_NS] oraliqda. */
+    private fun theilSenVelocity(): Float {
+        var n = 0
+        for (i in 0 until sampleCount) {
+            for (j in i + 1 until sampleCount) {
+                val dt = sampleNs[j] - sampleNs[i]
+                if (dt < MIN_PAIR_DT_NS) continue
+                slopes[n++] = ((sampleX[j] - sampleX[i]) / (dt / 1_000_000_000.0)).toFloat()
+            }
         }
-        meanT /= count
-        meanX /= count
-        fitMeanNs = meanT
-        fitMeanX = meanX.toFloat()
-        var num = 0.0
-        var den = 0.0
-        for (i in 0 until count) {
-            val dt = sampleNs[i] - meanT
-            num += dt * (sampleX[i] - meanX)
-            den += dt * dt
+        if (n == 0) return 0f
+        return median(slopes, n)
+    }
+
+    /** [atNs] paytdagi o'rin: har namunadan tezlik bo'yicha surilgan o'rinlar medianasi. */
+    private fun anchorAt(atNs: Long): Float {
+        val v = speedPxPerSec
+        for (i in 0 until sampleCount) {
+            residuals[i] = sampleX[i] + v * ((atNs - sampleNs[i]) / 1_000_000_000f)
         }
-        if (den <= 1.0) return 0f
-        return (num / den * 1_000_000_000.0).toFloat()
+        return median(residuals, sampleCount)
+    }
+
+    private fun median(values: FloatArray, n: Int): Float {
+        java.util.Arrays.sort(values, 0, n)
+        return if (n % 2 == 1) values[n / 2] else (values[n / 2 - 1] + values[n / 2]) * 0.5f
     }
 
     /**
@@ -318,6 +373,10 @@ class AutoPlacer(
         prevX = Float.NaN
         prevContentNs = 0L
         sampleCount = 0
+        legSamples = 0
+        sampleSkips = 0
+        samplesBlockedThisLeg = false
+        anchorX = Float.NaN
         speedKnown = false
         legDirection = 0
         speedPxPerSec = 0f
@@ -340,10 +399,15 @@ class AutoPlacer(
         /** Lab playfield margin, the same 6% the game geometry uses. */
         private const val PLAYFIELD_MARGIN = 0.06f
         const val SAMPLES = 6
+        /** Oyoq bo'yicha tezlik/o'rin bahosi uchun eng ko'p namuna (194525: 24 eng yaxshi). */
+        const val LEG_WINDOW = 24
+        /** Ma'lum tezlik yangi oyoqda shuncha namunadan keyin qayta baholanadi. */
+        private const val LEG_REFIT_SAMPLES = 3
+        /** Theil–Sen juftlari orasidagi eng kam vaqt: yaqin juftlar shovqinli. */
+        private const val MIN_PAIR_DT_NS = 8_000_000L
         /** Observations the tracker wants before its first placement. */
         const val WARMUP_OBSERVATIONS = 10
-        const val FIT_TOLERANCE_PX = 3f
-        /** Shuncha namuna bo'lsa, ma'lum tezlik yangi oyoqda aniqlashtiriladi. */
+        /** Shuncha namunadan o'rin bahosi (median) olinadi. */
         private const val MIN_FIT_SAMPLES = 3
         /** Yo'nalish almashinuvi shovqin emas, deb hisoblanadigan siljish. */
         private const val BOUNCE_MIN_PX = 2f

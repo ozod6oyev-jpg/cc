@@ -82,8 +82,12 @@ class AutoPlayer(private val config: Config = Config()) {
          * rejadagisi bekor qilinadi.
          */
         val staticCancelFrames: Int = 2,
-        /** Joriy oyoqda shuncha kamera namunasi bo'lmaguncha tap yo'q ([AutoPlacer]). */
-        val minLegSamples: Int = 12,
+        /**
+         * Joriy oyoqda shuncha kamera namunasi bo'lmaguncha tap yo'q ([AutoPlacer]).
+         * Real oqimda (194525) 4+ namunadan bashorat 10 ms ichida; o'tish ko'pincha
+         * oyoqning 4–5-kadrida keladi, katta talab o'tishlarni behuda o'tkazadi.
+         */
+        val minLegSamples: Int = 5,
         /** Natija shuncha vaqtda o'lchanmasa, kutish to'xtatiladi. */
         val resultTimeoutNs: Long = 1_500_000_000L,
         /**

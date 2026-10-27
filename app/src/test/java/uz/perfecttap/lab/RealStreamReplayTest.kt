@@ -52,7 +52,7 @@ class RealStreamReplayTest {
         }
         val legs = buildTruth(frames, taps)
 
-        val placer = AutoPlacer(cooldownNs = 120_000_000L, learnPlayfield = true, minLegSamples = 12)
+        val placer = AutoPlacer(cooldownNs = 120_000_000L, learnPlayfield = true, minLegSamples = 5)
         val errorsMs = ArrayList<Double>()
         var tapIndex = 0
         for (f in frames) {

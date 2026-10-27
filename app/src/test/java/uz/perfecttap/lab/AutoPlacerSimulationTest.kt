@@ -51,8 +51,11 @@ class AutoPlacerSimulationTest {
         delayMs: Long,
         baseSpeedPxPerSec: Float = 0f,
         growthPerBlock: Float = 1f,
-        steps: Int = 30000
+        steps: Int = 30000,
+        noisePx: Float = 0f
     ): Report {
+        // Detektor shovqini: deterministik, testlar takrorlanuvchan bo'lsin.
+        val random = java.util.Random(42)
         val sim = GameSim(
             screenWidth = 1080,
             screenHeight = 2400,
@@ -77,7 +80,8 @@ class AutoPlacerSimulationTest {
 
             if (nowNs < 250 * ms) return@repeat
             val contentNs = nowNs - delayMs * ms
-            val contentX = history.at(contentNs)
+            val contentX = history.at(contentNs) +
+                (random.nextFloat() * 2f - 1f) * noisePx
             val width = sim.width
             val stackCenter = sim.stackX + sim.width * 0.5f
 
@@ -126,6 +130,23 @@ class AutoPlacerSimulationTest {
         assertTrue(
             "perfect=${report.perfect}/${report.placements} worst=${report.worstOffset.toInt()}px",
             report.perfect >= report.placements * 95 / 100
+        )
+    }
+
+    @Test
+    fun staysPerfectAtHighSpeedWithDetectorNoise() {
+        // Lab sessiyasidagi sozlama: 1800 px/s, +5% har blokda, ±0.7 px shovqin.
+        val report = run(
+            delayMs = DELAY_MS,
+            baseSpeedPxPerSec = 1800f,
+            growthPerBlock = 1.05f,
+            noisePx = 0.7f
+        )
+        println("high-speed: perfect=${report.perfect}/${report.placements} worst=${report.worstOffset}")
+        assertTrue("placements=${report.placements}", report.placements >= 40)
+        assertTrue(
+            "perfect=${report.perfect}/${report.placements} worst=${report.worstOffset.toInt()}px",
+            report.perfect >= report.placements * 90 / 100
         )
     }
 

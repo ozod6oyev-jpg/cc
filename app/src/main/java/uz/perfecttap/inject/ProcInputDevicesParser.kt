@@ -7,7 +7,7 @@ package uz.perfecttap.inject
  *   I: Bus=0018 Vendor=04e8 Product=... Version=...
  *   N: Name="sec_touchscreen"
  *   H: Handlers=event4
- *   B: ABS=260800011000003 0
+ *   B: ABS=660800000000003
  */
 object ProcInputDevicesParser {
 
@@ -92,8 +92,17 @@ object ProcInputDevicesParser {
         return score
     }
 
+    /**
+     * The kernel prints the bitmap as `unsigned long` words, **most significant
+     * first** ("B: ABS=2658000 3" on a 32-bit kernel, one word on a 64-bit one),
+     * so the lowest word is the last one. ABS_CNT is 64: more than one word means
+     * 32-bit words.
+     */
     private fun hasAbs(words: List<String>, code: Int): Boolean {
-        val word = words.getOrNull(code / 64)?.toULongOrNull(16) ?: return false
-        return (word shr (code % 64)) and 1uL == 1uL
+        if (words.isEmpty()) return false
+        val bitsPerWord = if (words.size > 1 && words.all { it.length <= 8 }) 32 else 64
+        val index = words.size - 1 - code / bitsPerWord
+        val word = words.getOrNull(index)?.toULongOrNull(16) ?: return false
+        return (word shr (code % bitsPerWord)) and 1uL == 1uL
     }
 }

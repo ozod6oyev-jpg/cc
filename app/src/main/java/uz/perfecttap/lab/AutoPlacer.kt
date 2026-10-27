@@ -19,7 +19,12 @@ class AutoPlacer(
     private val cooldownNs: Long = 150_000_000L,
     private val maxScheduleNs: Long = 60_000_000L,
     private val maxPredictionNs: Long = 600_000_000L,
-    private val minSpeedPxPerSec: Float = 25f
+    private val minSpeedPxPerSec: Float = 25f,
+    /**
+     * Haqiqiy o'yinda maydon chegaralari noma'lum: true bo'lsa, ular blok
+     * qaytgan joylardan o'rganiladi (labda 6% chekka ma'lum, shuning uchun false).
+     */
+    private val learnPlayfield: Boolean = false
 ) {
 
     /** [scheduleInNs] — qo'yishni shu vaqtdan keyin bajarish kerak (-1 = yo'q). */
@@ -27,7 +32,13 @@ class AutoPlacer(
         val scheduleInNs: Long,
         val predictedCenterX: Float,
         val stackCenterX: Float,
-        val speedPxPerSec: Float
+        val speedPxPerSec: Float,
+        /**
+         * Bashorat chetdan qaytishni o'z ichiga oladi (kadrdan beri blok devorga
+         * urilgan). Qaytish modeli o'yinga mos kelmasa (chetda to'xtash), bu
+         * bashorat bir kadrgacha adashadi.
+         */
+        val throughBounce: Boolean = false
     )
 
     /** Kamera o'lchagan stack markazi (px); o'lchov bo'lmasa NaN. */
@@ -48,20 +59,42 @@ class AutoPlacer(
     private val sampleX = FloatArray(SAMPLES)
     private val sampleNs = LongArray(SAMPLES)
     private var sampleCount = 0
+    /** Tezlik kattaligi shu blok uchun to'liq oyna bo'yicha o'lchangan. */
+    private var speedKnown = false
+    /** Joriy harakat yo'nalishi (+1 / -1; 0 = hali noma'lum). */
+    private var legDirection = 0
     private var observations = 0
     private var lastPlaceArrivalNs = Long.MIN_VALUE / 2
     private var placedOnce = false
+    /**
+     * Qo'yishdan oldingi holatni ko'rsatuvchi kadrlar (oqim kechikishi tufayli
+     * qo'yishdan keyin ham kelib turadi) e'tiborga olinmaydi.
+     */
+    private var ignoreContentBeforeNs = Long.MIN_VALUE
+
+    /** Kuzatilgan eng chap / eng o'ng blok qirrasi va qaysi devordan qaytgani. */
+    private var edgeMin = Float.MAX_VALUE
+    private var edgeMax = -Float.MAX_VALUE
+    private var leftWallSeen = false
+    private var rightWallSeen = false
 
     fun reset() {
+        edgeMin = Float.MAX_VALUE
+        edgeMax = -Float.MAX_VALUE
+        leftWallSeen = false
+        rightWallSeen = false
         lastReason = REASON_IDLE
         stackCenterX = Float.NaN
         speedPxPerSec = 0f
         prevX = Float.NaN
         prevContentNs = 0L
         sampleCount = 0
+        speedKnown = false
+        legDirection = 0
         observations = 0
         lastPlaceArrivalNs = Long.MIN_VALUE / 2
         placedOnce = false
+        ignoreContentBeforeNs = Long.MIN_VALUE
     }
 
     /**
@@ -81,6 +114,12 @@ class AutoPlacer(
         nowNs: Long,
         screenWidthPx: Float
     ): Decision {
+        // Kadr hali qo'yishdan oldingi sahnani ko'rsatyapti: eski blok va eski
+        // stack yangi tezlik namunalariga aralashsa, keyingi bashorat buziladi.
+        if (contentTimestampNs < ignoreContentBeforeNs) {
+            lastReason = REASON_STALE
+            return Decision(-1L, centerX, stackCenterX, speedPxPerSec)
+        }
         if (stackRight - stackLeft > 1f) {
             stackCenterX = (stackLeft + stackRight) * 0.5f
         }
@@ -95,6 +134,10 @@ class AutoPlacer(
 
         updateSpeed(contentTimestampNs, centerX)
         observations++
+        if (learnPlayfield) {
+            edgeMin = minOf(edgeMin, centerX - widthPx * 0.5f)
+            edgeMax = maxOf(edgeMax, centerX + widthPx * 0.5f)
+        }
 
         // The frame shows the block where it was at contentTimestampNs; the stream
         // can be hundreds of ms old, so predict forward to the current moment.
@@ -102,8 +145,16 @@ class AutoPlacer(
         // The block reflects off the playfield edges, and the captured frame can be
         // hundreds of ms old, so the straight-line prediction is folded back into
         // the playfield: this survives bounces that happened inside the delay.
-        val lo = screenWidthPx * PLAYFIELD_MARGIN + widthPx * 0.5f
-        val hi = screenWidthPx * (1f - PLAYFIELD_MARGIN) - widthPx * 0.5f
+        val lo = if (learnPlayfield && leftWallSeen) {
+            edgeMin + widthPx * 0.5f
+        } else {
+            screenWidthPx * PLAYFIELD_MARGIN + widthPx * 0.5f
+        }
+        val hi = if (learnPlayfield && rightWallSeen) {
+            edgeMax - widthPx * 0.5f
+        } else {
+            screenWidthPx * (1f - PLAYFIELD_MARGIN) - widthPx * 0.5f
+        }
         val raw = centerX + speedPxPerSec * (ageNs / 1_000_000_000f)
         val folded = fold(raw, lo, hi)
         val predicted = folded.first
@@ -112,7 +163,7 @@ class AutoPlacer(
         // Right after a placement (and at session start) there is no usable speed
         // yet: one frame of movement can be a bounce. Waiting for the full window
         // costs a couple of frames but removes the first-cut mistakes.
-        if (sampleCount < SAMPLES) {
+        if (!speedKnown) {
             lastReason = REASON_SAMPLES
             return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
         }
@@ -145,21 +196,40 @@ class AutoPlacer(
             return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
         }
         lastReason = REASON_SCHEDULED
-        return Decision(crossingNs, predicted, stackCenterX, speedPxPerSec)
+        return Decision(crossingNs, predicted, stackCenterX, speedPxPerSec, throughBounce = raw != predicted)
     }
 
     /**
      * Velocity from the frame's own timestamps (the pipeline delivers frames in
-     * bursts, so arrival deltas would be noise). A 3-sample least-squares fit is
-     * used while it agrees with the newest pair; a bounce inside the window breaks
-     * that agreement and the newest pair wins.
+     * bursts, so arrival deltas would be noise).
+     *
+     * A block keeps the same speed until it is placed; at the playfield edge only
+     * the direction flips. So the magnitude is fitted over samples of one leg,
+     * and a bounce keeps it, flips the sign and starts a new leg from the newest
+     * sample. A fit across a bounce (or across the frame where the block is
+     * clamped to the edge) would mix the two legs and give a wrong, jumping
+     * speed — which in the lab moved the tap by a whole frame.
      */
     private fun updateSpeed(contentTimestampNs: Long, centerX: Float) {
         if (!prevX.isNaN()) {
             val dt = (contentTimestampNs - prevContentNs) / 1_000_000_000f
-            when {
-                dt in 0.004f..0.25f -> speedPxPerSec = (centerX - prevX) / dt
-                dt > 0.25f -> speedPxPerSec = 0f
+            val dx = centerX - prevX
+            if (dt > 0.25f) {
+                // Long gap: the motion may have changed in any way.
+                sampleCount = 0
+                speedKnown = false
+                speedPxPerSec = 0f
+                legDirection = 0
+            } else if (dt > 0f && abs(dx) >= BOUNCE_MIN_PX) {
+                val pairDirection = if (dx > 0f) 1 else -1
+                if (legDirection != 0 && pairDirection != legDirection) {
+                    // Bounce: same speed, other direction, new leg.
+                    if (legDirection > 0) rightWallSeen = true else leftWallSeen = true
+                    if (speedKnown) speedPxPerSec = -speedPxPerSec
+                    sampleCount = 0
+                }
+                legDirection = pairDirection
+                if (!speedKnown && dt >= 0.004f) speedPxPerSec = dx / dt
             }
         }
         prevX = centerX
@@ -178,15 +248,25 @@ class AutoPlacer(
             sampleNs[SAMPLES - 1] = contentTimestampNs
         }
 
-        if (sampleCount < SAMPLES) return
+        if (sampleCount < MIN_FIT_SAMPLES) return
         val fit = fitVelocity()
         if (fit == 0f) return
-        // Residual of the newest sample against the fit: a bounce shows up here.
-        val predictedNewest = sampleX[0] + fit * ((sampleNs[SAMPLES - 1] - sampleNs[0]) / 1_000_000_000f)
-        if (abs(predictedNewest - sampleX[SAMPLES - 1]) <= FIT_TOLERANCE_PX) {
+        // Every sample must sit on the fitted line: an edge-clamped frame or a
+        // mismatched timestamp shows up as a large residual and is not trusted.
+        var worst = 0f
+        for (i in 0 until sampleCount) {
+            val onLine = fitMeanX + fit * ((sampleNs[i] - fitMeanNs) / 1_000_000_000.0).toFloat()
+            worst = maxOf(worst, abs(onLine - sampleX[i]))
+        }
+        if (worst > FIT_TOLERANCE_PX) return
+        if (speedKnown || sampleCount >= SAMPLES) {
             speedPxPerSec = fit
+            speedKnown = true
         }
     }
+
+    private var fitMeanNs = 0.0
+    private var fitMeanX = 0f
 
     private fun fitVelocity(): Float {
         var meanT = 0.0
@@ -198,6 +278,8 @@ class AutoPlacer(
         }
         meanT /= count
         meanX /= count
+        fitMeanNs = meanT
+        fitMeanX = meanX.toFloat()
         var num = 0.0
         var den = 0.0
         for (i in 0 until count) {
@@ -222,14 +304,22 @@ class AutoPlacer(
         return if (t <= span) Pair(lo + t, 1f) else Pair(hi - (t - span), -1f)
     }
 
-    /** Called right after the block was actually placed. */
-    fun onPlaced(arrivalNs: Long) {
+    /**
+     * Called right after the block was actually placed. [placedAtNs] is the tap's
+     * own time (content clock); frames showing the scene before it are ignored.
+     */
+    fun onPlaced(arrivalNs: Long, placedAtNs: Long = arrivalNs) {
         placedOnce = true
         lastPlaceArrivalNs = arrivalNs
+        ignoreContentBeforeNs = placedAtNs
+        // The top of the stack changed (a cut moves its centre): re-measure it.
+        stackCenterX = Float.NaN
         // The block respawns at the stack centre, so the previous velocity is stale.
         prevX = Float.NaN
         prevContentNs = 0L
         sampleCount = 0
+        speedKnown = false
+        legDirection = 0
         speedPxPerSec = 0f
     }
 
@@ -245,12 +335,17 @@ class AutoPlacer(
         const val REASON_TOO_SLOW = "sekin"
         const val REASON_MISSED = "o_tib_ketdi"
         const val REASON_FAR = "uzoq"
+        const val REASON_STALE = "eski_kadr"
 
         /** Lab playfield margin, the same 6% the game geometry uses. */
         private const val PLAYFIELD_MARGIN = 0.06f
-        private const val SAMPLES = 3
+        const val SAMPLES = 6
         /** Observations the tracker wants before its first placement. */
         const val WARMUP_OBSERVATIONS = 10
-        const val FIT_TOLERANCE_PX = 12f
+        const val FIT_TOLERANCE_PX = 3f
+        /** Shuncha namuna bo'lsa, ma'lum tezlik yangi oyoqda aniqlashtiriladi. */
+        private const val MIN_FIT_SAMPLES = 3
+        /** Yo'nalish almashinuvi shovqin emas, deb hisoblanadigan siljish. */
+        private const val BOUNCE_MIN_PX = 2f
     }
 }

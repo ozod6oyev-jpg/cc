@@ -7,6 +7,8 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.provider.Settings
+import android.net.Uri
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -17,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import rikka.shizuku.Shizuku
 import uz.perfecttap.capture.CaptureBus
 import uz.perfecttap.capture.CaptureService
 import uz.perfecttap.capture.CaptureStats
@@ -29,6 +32,10 @@ import uz.perfecttap.inject.TapChannelFactory
 import uz.perfecttap.inject.TouchDevice
 import uz.perfecttap.inject.TouchDeviceFinder
 import uz.perfecttap.lab.LabActivity
+import uz.perfecttap.auto.OverlayService
+import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -37,7 +44,7 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         /** Ko'rinadigan bosqich raqami; versiya `versionName` bilan birga oshiriladi. */
-        const val STAGE = "5"
+        const val STAGE = "6"
         const val SHIZUKU_REQUEST_CODE = 1001
     }
 
@@ -55,13 +62,27 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         val data = result.data
         if (result.resultCode != RESULT_OK || data == null) {
+            openPanelAfterConsent = false
             log("Ekran oqimi ruxsati berilmadi")
             return@registerForActivityResult
         }
         log("Ekran oqimi ruxsati olindi — xizmat ishga tushmoqda")
-        val intent = CaptureService.startIntent(this, result.resultCode, data)
+        val auto = openPanelAfterConsent
+        openPanelAfterConsent = false
+        // Avto-kliker butun ekranni kuzatadi (ROI = 0).
+        val intent = CaptureService.startIntent(this, result.resultCode, data, lab = auto, roiBottomY = 0)
         ContextCompat.startForegroundService(this, intent)
+        if (auto) openOverlay()
     }
+
+    /** Ekran oqimi ruxsatidan keyin panel ochilsinmi. */
+    private var openPanelAfterConsent = false
+
+    /** Sessiya faylini foydalanuvchi tanlagan joyga saqlash (SAF). */
+    private var sessionToSave: File? = null
+    private val saveSessionLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri -> if (uri != null) exportSession(uri) }
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -85,9 +106,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnCaptureStop.setOnClickListener {
             startService(CaptureService.stopIntent(this))
         }
-        binding.btnOpenLab.setOnClickListener {
-            startActivity(Intent(this, LabActivity::class.java))
-        }
+        binding.btnAutoPanel.setOnClickListener { onAutoPanelClicked() }
+        binding.btnSaveLastSession.setOnClickListener { saveLastSession() }
         binding.btnOpenLab.setOnClickListener {
             startActivity(Intent(this, LabActivity::class.java))
         }
@@ -110,10 +130,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         refresh()
     }
 
     override fun onDestroy() {
+        Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         channel?.close()
         channel = null
         super.onDestroy()
@@ -189,18 +211,17 @@ class MainActivity : AppCompatActivity() {
         setBusy(false)
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != SHIZUKU_REQUEST_CODE) return
-        val granted = grantResults.isNotEmpty() &&
-            grantResults[0] == PackageManager.PERMISSION_GRANTED
-        log(if (granted) "Shizuku ruxsati berildi" else "Shizuku ruxsati rad etildi")
-        refresh()
-    }
+    /**
+     * Shizuku ruxsat natijasi Activity.onRequestPermissionsResult ga emas, shu
+     * listener'ga keladi (asosiy oqimda).
+     */
+    private val shizukuPermissionListener =
+        Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+            if (requestCode != SHIZUKU_REQUEST_CODE) return@OnRequestPermissionResultListener
+            val granted = grantResult == PackageManager.PERMISSION_GRANTED
+            log(if (granted) "Shizuku ruxsati berildi" else "Shizuku ruxsati rad etildi")
+            refresh()
+        }
 
     private fun requestShizukuPermission() {
         val state = ShizukuInjector.state()
@@ -263,6 +284,79 @@ class MainActivity : AppCompatActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             requestProjectionConsent()
+        }
+    }
+
+    /**
+     * Avto-kliker: overlay ruxsati → (bildirishnoma) → ekran oqimi → panel.
+     * Oqim allaqachon ishlayotgan bo'lsa, faqat butun ekran tahliliga o'tadi.
+     */
+    private fun onAutoPanelClicked() {
+        if (!Settings.canDrawOverlays(this)) {
+            log(getString(R.string.overlay_permission_needed))
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            )
+            return
+        }
+        if (CaptureBus.running.value) {
+            startService(CaptureService.labIntent(this, true, 0))
+            openOverlay()
+            return
+        }
+        openPanelAfterConsent = true
+        onStartCaptureClicked()
+    }
+
+    private fun openOverlay() {
+        startService(OverlayService.startIntent(this))
+        log("Avto-kliker paneli ochildi — o'yinga o'ting va «Skanerlash»ni bosing")
+        // Bosish kanalini panel o'zi ochadi; bu yerdagi kanal unga xalaqit bermasin.
+        closeChannel()
+        setBusy(false)
+    }
+
+    /**
+     * Eng oxirgi sessiya (lab yoki avto): CSV va shu sessiyaning diagnostika
+     * kadrlari (`<nom>-frame-N.png`) bitta ZIP bo'lib saqlanadi.
+     */
+    private fun saveLastSession() {
+        val newest = File(filesDir, "sessions").listFiles { f -> f.extension == "csv" }
+            ?.maxByOrNull { it.lastModified() }
+        if (newest == null) {
+            log(getString(R.string.session_none))
+            return
+        }
+        sessionToSave = newest
+        saveSessionLauncher.launch(newest.nameWithoutExtension + ".zip")
+    }
+
+    private fun exportSession(uri: Uri) {
+        val file = sessionToSave ?: return
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val base = file.nameWithoutExtension
+                    val frames = file.parentFile
+                        ?.listFiles { f -> f.name.startsWith("$base-frame-") && f.extension == "png" }
+                        .orEmpty()
+                        .sortedBy { it.name }
+                    val out = contentResolver.openOutputStream(uri) ?: error("fayl ochilmadi")
+                    ZipOutputStream(out).use { zip ->
+                        for (entry in listOf(file) + frames) {
+                            zip.putNextEntry(ZipEntry(entry.name))
+                            entry.inputStream().use { it.copyTo(zip) }
+                            zip.closeEntry()
+                        }
+                    }
+                }
+            }
+            log(
+                result.fold(
+                    onSuccess = { getString(R.string.session_saved, file.name) },
+                    onFailure = { getString(R.string.session_save_failed, it.message ?: "?") }
+                )
+            )
         }
     }
 

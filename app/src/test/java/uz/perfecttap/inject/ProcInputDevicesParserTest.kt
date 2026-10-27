@@ -22,12 +22,12 @@ class ProcInputDevicesParserTest {
         P: Phys=18-0048/input0
         H: Handlers=event4
         B: EV=b
-        B: ABS=60000000000000 0
+        B: ABS=60000000000000
 
         I: Bus=0003 Vendor=0000 Product=0000 Version=0111
         N: Name="uinput-remote"
         H: Handlers=event7
-        B: ABS=60000000000000 0
+        B: ABS=60000000000000
     """.trimIndent() + "\n"
 
     @Test
@@ -57,7 +57,7 @@ class ProcInputDevicesParserTest {
         val text = """
             N: Name="vibrator"
             H: Handlers=event2
-            B: ABS=10000000000000 0
+            B: ABS=20000000000000
         """.trimIndent()
         val device = ProcInputDevicesParser.parse(text).single()
         assertFalse(device.hasMultiTouch)
@@ -74,7 +74,7 @@ class ProcInputDevicesParserTest {
             I: Bus=0018 Vendor=04e8
             N: Name="sec_touchscreen"
             H: Handlers=event4
-            B: ABS=60000000000000 0
+            B: ABS=60000000000000
         """.trimIndent()
         val devices = ProcInputDevicesParser.parse(text)
         assertEquals(2, devices.size)
@@ -87,7 +87,7 @@ class ProcInputDevicesParserTest {
             I: Bus=0003 Vendor=0000
             N: Name="uinput-remote"
             H: Handlers=event7
-            B: ABS=60000000000000 0
+            B: ABS=60000000000000
         """.trimIndent()
         val device = ProcInputDevicesParser.parse(text).single()
         assertTrue(device.hasMultiTouch)
@@ -95,11 +95,33 @@ class ProcInputDevicesParserTest {
     }
 
     @Test
+    fun readsMultiWordBitmapFromThe32BitKernel() {
+        // 32-bit kernel: two 32-bit words, most significant first.
+        val text = """
+            N: Name="sec_touchscreen"
+            H: Handlers=event4
+            B: ABS=2658000 3
+        """.trimIndent()
+        assertTrue(ProcInputDevicesParser.parse(text).single().hasMultiTouch)
+    }
+
+    @Test
+    fun lowBitsAloneAreNotMultitouch() {
+        // ABS_X/ABS_Y only (a single-touch panel or a joystick).
+        val text = """
+            N: Name="touch"
+            H: Handlers=event4
+            B: ABS=0 3
+        """.trimIndent()
+        assertFalse(ProcInputDevicesParser.parse(text).single().hasMultiTouch)
+    }
+
+    @Test
     fun ignoresBlocksWithoutEventHandler() {
         val text = """
             N: Name="something"
             H: Handlers=mouse0
-            B: ABS=60000000000000 0
+            B: ABS=60000000000000
         """.trimIndent()
         assertTrue(ProcInputDevicesParser.parse(text).isEmpty())
     }

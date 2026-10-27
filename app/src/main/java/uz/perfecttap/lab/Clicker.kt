@@ -48,7 +48,7 @@ class Clicker(
                     // Blok stack markazida qayta tug'iladi: eski tezlik va namunalar
                     // endi yaroqsiz, ularni tashlab yubormasak keyingi bashorat xato
                     // bo'lib, blok kesiladi.
-                    placer.onPlaced(System.nanoTime())
+                    placer.onPlaced(System.nanoTime(), at)
                 }
             } else {
                 choreographer.postFrameCallback(this)

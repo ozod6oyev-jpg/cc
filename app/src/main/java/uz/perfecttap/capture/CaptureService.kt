@@ -70,6 +70,8 @@ class CaptureService : Service() {
          * «yopishib qolgan» hisoblanadi va bir blok balandlikka suriladi.
          */
         private const val STUCK_FRAMES = 6
+        /** Blok shuncha vaqt ichida siljigan bo'lsa, u kuzatuvda hisoblanadi. */
+        private const val MOVING_LOCK_NS = 400_000_000L
 
         fun startIntent(
             context: Context,
@@ -89,8 +91,11 @@ class CaptureService : Service() {
         fun stopIntent(context: Context): Intent =
             Intent(context, CaptureService::class.java).setAction(ACTION_STOP)
 
-        /** Turns per-frame lab observations on/off without restarting the stream. */
-        fun labIntent(context: Context, enabled: Boolean, roiBottomY: Int = 0): Intent =
+        /**
+         * Turns per-frame lab observations on/off without restarting the stream.
+         * [roiBottomY]: panel top in screen px, 0 = whole screen, -1 = keep.
+         */
+        fun labIntent(context: Context, enabled: Boolean, roiBottomY: Int = -1): Intent =
             Intent(context, CaptureService::class.java).apply {
                 action = ACTION_LAB_MODE
                 putExtra(EXTRA_LAB, enabled)
@@ -125,12 +130,26 @@ class CaptureService : Service() {
     private var lastPublishNs = 0L
     private var lastHeapBytes = 0L
     private var lastHeapSampleNs = 0L
+    // UI oqimida yoziladi, kadr oqimida o'qiladi.
+    @Volatile
     private var active = false
+    @Volatile
     private var labMode = false
     /** Lab ROI pastki chegarasi (panel tepasi); 0 = cheklanmagan. */
+    @Volatile
     private var roiBottomY = 0
     /** Oxirgi marta blok ko'rilgan vaqt; tasmani qayta markazlash uchun. */
     private var lastBlockSeenNs = 0L
+    /**
+     * Butun ekran (avto-kliker) rejimi: blok qadami va balandligi eslab qolinadi.
+     * Harakatlanuvchi blok stack ustida bo'lmaganda tasma uning tagida blok
+     * ko'rmaydi — stack shunda ham `bandCenterY + pitch` da o'lchanadi.
+     */
+    private var autoPitchPx = 0f
+    private var autoHeightPx = 0f
+    /** Harakatlanuvchi blok oxirgi marta joyidan siljigan payt. */
+    private var lastMovingNs = 0L
+
     /** Oxirgi o'lchangan blok markazi va u joyida turgan kadrlar soni. */
     private var lastCenterX = Float.NaN
     private var staticFrames = 0
@@ -150,10 +169,15 @@ class CaptureService : Service() {
 
             ACTION_LAB_MODE -> {
                 labMode = active && intent.getBooleanExtra(EXTRA_LAB, false)
-                val roi = intent.getIntExtra(EXTRA_ROI_BOTTOM, 0)
-                if (roi > 0 && roi != roiBottomY) {
+                // 0 = butun ekran (avto-kliker), -1 = o'zgartirmaslik.
+                val roi = intent.getIntExtra(EXTRA_ROI_BOTTOM, -1)
+                if (roi >= 0 && roi != roiBottomY) {
                     roiBottomY = roi
-                    if (labMode) rebuildLabReaders()
+                    // Tasma kadr oqimida ishlatiladi: uni o'sha oqimda almashtiramiz,
+                    // aks holda kadr yangi tasmani eski detektor bilan o'qishi mumkin.
+                    if (labMode) {
+                        captureHandler?.post { rebuildLabReaders() } ?: rebuildLabReaders()
+                    }
                 }
                 Log.i(TAG, "lab mode -> $labMode (active=$active, roiBottom=$roiBottomY)")
                 if (!labMode) CaptureBus.clearLabFrames()
@@ -241,6 +265,9 @@ class CaptureService : Service() {
         lastPipelineDelayNs = 0
         hasBlock = false
         lastBlockSeenNs = 0L
+        autoPitchPx = 0f
+        autoHeightPx = 0f
+        lastMovingNs = 0L
         lastCenterX = Float.NaN
         staticFrames = 0
         bandLuminance = 0f
@@ -311,6 +338,9 @@ class CaptureService : Service() {
             // buffers then become inaccessible and must not be read.
             if (!active) return
             val plane = image.planes.firstOrNull() ?: return
+            CaptureBus.takeSnapshotRequest()?.let { file ->
+                saveSnapshot(plane, image.width, image.height, file)
+            }
             val slice = scanline ?: return
             // 1) Y tracking: locate the moving block in a vertical strip placed at
             // the block's last measured X, so the strip stays on the moving block.
@@ -331,11 +361,20 @@ class CaptureService : Service() {
                     val found = vertical.detect(strip.pixels)
                     stripLuminance = vertical.lastMeanLum
                     stripMaxLuminance = vertical.lastMaxLum
-                    if (found != null) {
-                        val center = strip.startY + found.centerRow * strip.rowStep
+                    val center = found?.let { strip.startY + it.centerRow * strip.rowStep } ?: 0f
+                    // Avto rejim: harakatlanuvchi blok kuzatilayotgan bo'lsa, undan
+                    // pastdagi nomzod — stackning o'zi (blok stack ustida emas), rad.
+                    val belowTracked = found != null && wholeScreen() &&
+                        System.nanoTime() - lastMovingNs < MOVING_LOCK_NS &&
+                        center > bandCenterY + autoHeightPx * 0.5f
+                    if (found != null && !belowTracked) {
                         bandCenterY = center.roundToInt().coerceIn(BAND_HEIGHT / 2, bandLimitY())
                         movingBottomY = strip.startY + found.bottomRow * strip.rowStep
                         movingHeightPx = found.heightPx
+                        if (wholeScreen()) {
+                            autoPitchPx = found.pitchPx
+                            autoHeightPx = found.heightPx
+                        }
                     }
                 }
             }
@@ -370,6 +409,7 @@ class CaptureService : Service() {
                     } else {
                         staticFrames = 0
                         lastCenterX = centerNow
+                        lastMovingNs = System.nanoTime()
                     }
                 } else if (labMode &&
                     System.nanoTime() - lastBlockSeenNs > STRIP_RECENTER_NS
@@ -383,10 +423,11 @@ class CaptureService : Service() {
                 // balandda. Kamera stackka «yopishib» qolsa, o'lchov joyida
                 // qotib qoladi — bir blok yuqoridagi qatordan qayta qidiramiz.
                 if (labMode && hasBlock && staticFrames >= STUCK_FRAMES) {
-                    val blockHeight = if (movingHeightPx > 1f) {
-                        movingHeightPx
-                    } else {
-                        BAND_HEIGHT.toFloat()
+                    val blockHeight = when {
+                        // Avto rejim: bloklar orasida tirqish bor — qadam bilan suriladi.
+                        wholeScreen() && autoPitchPx > 1f -> autoPitchPx
+                        movingHeightPx > 1f -> movingHeightPx
+                        else -> BAND_HEIGHT.toFloat()
                     }
                     val shifted = (bandCenterY - blockHeight).roundToInt()
                         .coerceIn(BAND_HEIGHT / 2, bandLimitY())
@@ -421,9 +462,14 @@ class CaptureService : Service() {
                 var stackLeft = 0f
                 var stackRight = 0f
                 val stack = stackDetector
-                if (labMode && stack != null && movingBottomY >= 0f) {
-                    val stackY = (movingBottomY + movingHeightPx * 0.5f).roundToInt()
-                        .coerceIn(BAND_HEIGHT / 2, bandLimitY())
+                val autoStack = wholeScreen() && autoPitchPx > 1f
+                if (labMode && stack != null && (movingBottomY >= 0f || autoStack)) {
+                    val stackY = if (autoStack) {
+                        // Stack statik va harakatlanuvchi blokdan roppa-rosa bir qadam pastda.
+                        (bandCenterY + autoPitchPx).roundToInt()
+                    } else {
+                        (movingBottomY + movingHeightPx * 0.5f).roundToInt()
+                    }.coerceIn(BAND_HEIGHT / 2, bandLimitY())
                     val stackRows = slice.readBand(
                         buffer = plane.buffer,
                         rowStride = plane.rowStride,
@@ -477,20 +523,67 @@ class CaptureService : Service() {
     }
 
     /**
+     * Diagnostika: butun kadrni PNG qilib saqlaydi (skanerlash paytida, kam-kam).
+     * Piksellar shu oqimda nusxalanadi (bufer kadrdan keyin yopiladi),
+     * siqish esa alohida oqimda.
+     */
+    private fun saveSnapshot(plane: android.media.Image.Plane, width: Int, height: Int, file: java.io.File) {
+        val buffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val limit = buffer.limit()
+        val argb = IntArray(width * height)
+        for (y in 0 until height) {
+            val base = y * rowStride
+            for (x in 0 until width) {
+                val offset = base + x * pixelStride
+                if (offset + 4 > limit) break
+                val p = buffer.getInt(offset)
+                // RGBA bayt tartibi (little endian int: AABBGGRR) -> ARGB.
+                argb[y * width + x] = (p and 0xFF00FF00.toInt()) or
+                    ((p and 0xFF) shl 16) or ((p ushr 16) and 0xFF)
+            }
+        }
+        Thread({
+            runCatching {
+                val bitmap = android.graphics.Bitmap.createBitmap(
+                    argb, width, height, android.graphics.Bitmap.Config.ARGB_8888
+                )
+                file.outputStream().use {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                }
+                bitmap.recycle()
+            }.onFailure { Log.w(TAG, "snapshot failed", it) }
+        }, "pt-snapshot").start()
+    }
+
+    /**
      * Y-tracking tasmasini ROI bilan quradi. Lab rejimi yoqilganda ROI
      * o'zgargan bo'lsa, tasma shu chegara bilan qayta quriladi.
      */
     private fun rebuildLabReaders() {
         val height = imageHeight
         if (imageWidth <= 0 || height <= 0) return
+        // Rejim (lab ↔ butun ekran) almashgan bo'lishi mumkin: o'rganilgan qadam eskirgan.
+        autoPitchPx = 0f
+        autoHeightPx = 0f
         val stripWidth = STRIP_WIDTH
         val rowStep = 2
         val startY = (height * 0.22f).toInt()
         val endY = maxOf(startY + rowStep * 4, bandLimitY() + BAND_HEIGHT / 2)
         val strip = VerticalStripReader(stripWidth, rowStep, startY, endY)
         stripReader = strip
-        verticalDetector = VerticalEdgeDetector(stripWidth, rowStep, strip.rows)
+        // ROI = 0 — avto-kliker butun ekranda, haqiqiy o'yin ustida ishlaydi.
+        verticalDetector = VerticalEdgeDetector(
+            stripWidth,
+            rowStep,
+            strip.rows,
+            requireBlockBelow = roiBottomY == 0
+        )
     }
+
+    /** ROI = 0: avto-kliker butun ekranda, haqiqiy o'yin ustida. */
+    private fun wholeScreen(): Boolean = roiBottomY == 0
 
     /**
      * Tahlil hududining pastki chegarasi (kadr markazi uchun): panel tepasi
@@ -565,36 +658,40 @@ class CaptureService : Service() {
         // proses SIGSEGV bilan o'ladi. Shuning uchun yopish kadr oqimining
         // o'zida bajariladi: u yerda onFrameAvailable ham ishlaydi va ular
         // hech qachon parallel bo'lmaydi.
-        val teardown = Runnable {
-            runCatching { imageReader?.setOnImageAvailableListener(null, null) }
-            runCatching { virtualDisplay?.release() }
-            runCatching { imageReader?.close() }
-            runCatching { projection?.stop() }
-            projection = null
-            virtualDisplay = null
-            imageReader = null
-            scanline = null
-            detector = null
-            stackDetector = null
-            stripReader = null
-            verticalDetector = null
-        }
+        // Resurslar lokal o'zgaruvchilarga olinadi va maydonlar darhol tozalanadi:
+        // to'xtatishdan keyin tez qayta boshlansa, kechiktirilgan teardown yangi
+        // sessiyaning reader/projection/oqimini yopib yubormasligi kerak.
+        val reader = imageReader
+        val display = virtualDisplay
+        val oldProjection = projection
+        val thread = captureThread
         val handler = captureHandler
-        val onCaptureThread = handler != null &&
+        projection = null
+        virtualDisplay = null
+        imageReader = null
+        captureThread = null
+        captureHandler = null
+        scanline = null
+        detector = null
+        stackDetector = null
+        stripReader = null
+        verticalDetector = null
+
+        val teardown = Runnable {
+            runCatching { reader?.setOnImageAvailableListener(null, null) }
+            runCatching { display?.release() }
+            runCatching { reader?.close() }
+            runCatching { oldProjection?.stop() }
+        }
+        val postToCaptureThread = handler != null &&
             handler.looper.thread.isAlive &&
             Thread.currentThread() !== handler.looper.thread
-        if (wasActive && onCaptureThread) {
+        if (wasActive && postToCaptureThread) {
             handler!!.post(teardown)
-            handler.post {
-                captureThread?.quitSafely()
-                captureThread = null
-                captureHandler = null
-            }
+            handler.post { thread?.quitSafely() }
         } else {
             teardown.run()
-            captureThread?.quitSafely()
-            captureThread = null
-            captureHandler = null
+            thread?.quitSafely()
         }
 
         CaptureBus.running.value = false

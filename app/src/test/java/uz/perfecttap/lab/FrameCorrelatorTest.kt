@@ -50,4 +50,39 @@ class FrameCorrelatorTest {
         assertEquals(-1L, correlator.streamDeltaNs(100f, 200 * ms))
         assertEquals(8 * ms, correlator.streamDeltaNs(156f, 7 * 16 * ms + 8 * ms))
     }
+
+    /**
+     * Lab sessiyasidagi xato: chetdan qaytayotgan blok bir xil X dan o'tadi va
+     * kadr oldingi supurishdagi chizishga bog'lanib, Δ_stream ~100 ms ga sakrardi.
+     */
+    @Test
+    fun matchesTheReturnPassAfterABounce() {
+        val ring = FrameRing(64)
+        // Outbound: 100..172 px moving right, then back from 173 moving left.
+        for (i in 0..9) ring.record(i * 8 * ms, 100f + 8f * i, 1)
+        for (i in 10..19) ring.record(i * 8 * ms, 173f - 8f * (i - 9), -1)
+        val correlator = FrameCorrelator(ring, tolerancePx = 4f)
+
+        // Two frames of the return pass, captured 20 ms after their draws
+        // (133 px at 112 ms, 125 px at 120 ms). 124.2 px is closer to the
+        // outbound draw (124 px at 24 ms), but that pass moved the other way.
+        correlator.streamDeltaNs(133f, 132 * ms)
+        assertEquals(20 * ms, correlator.streamDeltaNs(124.2f, 140 * ms))
+        assertEquals(120 * ms, correlator.lastVsyncNs)
+    }
+
+    @Test
+    fun prefersTheDrawClosestToTheStableDelay() {
+        val ring = FrameRing(64)
+        // The square sits still at 300 px for a while: every draw matches.
+        for (i in 0..20) ring.record(i * 8 * ms, 300f)
+        val correlator = FrameCorrelator(ring, tolerancePx = 4f)
+        // A settled 24 ms delay (the newest draw is picked without a hint).
+        for (k in 0..3) {
+            ring.record((21 + k) * 8 * ms, 300f)
+            correlator.streamDeltaNs(300f, (21 + k) * 8 * ms + 24 * ms)
+        }
+        val delta = correlator.streamDeltaNs(300f, 24 * 8 * ms + 24 * ms)
+        assertEquals(24 * ms, delta)
+    }
 }

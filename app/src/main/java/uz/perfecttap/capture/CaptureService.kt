@@ -74,6 +74,8 @@ class CaptureService : Service() {
         private const val MOVING_LOCK_NS = 400_000_000L
         /** Tasdiqlangan blok shakli shuncha vaqt eslab qolinadi. */
         private const val EXPECT_SHAPE_NS = 3_000_000_000L
+        /** Tasdiqlangan maydonda blok bir kadrda shuncha qadamdan ko'p sakramaydi. */
+        private const val MAX_JUMP_PITCHES = 1.5f
         /** Kuzatuv yo'qolganda tasma sinab ko'riladigan X nuqtalar (ekran eniga nisbatan). */
         private val SEARCH_X = floatArrayOf(0.5f, 0.35f, 0.65f, 0.2f, 0.8f)
 
@@ -372,6 +374,9 @@ class CaptureService : Service() {
                         System.nanoTime() - lastStackMatchNs < EXPECT_SHAPE_NS
                     vertical.expectedHeightPx = if (expect) autoHeightPx else 0f
                     vertical.expectedPitchPx = if (expect) autoPitchPx else 0f
+                    vertical.expectedCenterRow =
+                        if (expect) (bandCenterY - strip.startY).toFloat() / strip.rowStep else -1f
+                    vertical.maxJumpRows = autoPitchPx * MAX_JUMP_PITCHES / strip.rowStep
                     var found = vertical.detect(strip.pixels)
                     stripLuminance = vertical.lastMeanLum
                     stripMaxLuminance = vertical.lastMaxLum

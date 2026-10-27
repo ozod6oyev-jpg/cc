@@ -60,6 +60,15 @@ class VerticalEdgeDetector(
     var expectedHeightPx = 0f
     var expectedPitchPx = 0f
 
+    /**
+     * [requireBlockBelow] rejimi: blok markazi kutilgan qator ([expectedCenterRow],
+     * `< 0` = noma'lum) dan ko'pi bilan [maxJumpRows] uzoqda bo'lishi kerak.
+     * Harakatlanuvchi blok kadrdan kadrga ko'pi bilan bir qadam suriladi; hisob
+     * raqami yoki «PERFECT!» yozuvi esa bir necha qadam yuqorida turadi.
+     */
+    var expectedCenterRow = -1f
+    var maxJumpRows = 0f
+
     /** Strip brightness: a black strip means the camera does not see the scene. */
     var lastMeanLum = 0f
         private set
@@ -184,6 +193,9 @@ class VerticalEdgeDetector(
             val heightPx = (blockBottom[a] - blockTop[a]) * rowStep
             if (expectedHeightPx > 0f &&
                 abs(heightPx - expectedHeightPx) > expectedHeightPx * HEIGHT_TOLERANCE
+            ) continue
+            if (expectedCenterRow >= 0f &&
+                abs((blockTop[a] + blockBottom[a]) * 0.5f - expectedCenterRow) > maxJumpRows
             ) continue
             val maxGapRows = max(12f, 0.2f * heightPx) / rowStep
             for (b in a + 1 until blocks) {

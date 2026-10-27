@@ -40,6 +40,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
@@ -68,6 +69,13 @@ class OverlayService : Service() {
         /** Diagnostika: skanerlash paytidagi kadrlar (PNG). */
         private const val MAX_SNAPSHOTS = 5
         private const val SNAPSHOT_EVERY_NS = 3_000_000_000L
+        /**
+         * Diagnostika: o'yin paytida kuzatuv sakraganda va xato natijada olinadigan
+         * kadrlar (skanerlash kadrlaridan alohida hisob).
+         */
+        private const val MAX_RUN_SNAPSHOTS = 8
+        /** Tasma Y shundan ko'p sakrasa — kuzatuv boshqa narsaga o'tgan bo'lishi mumkin. */
+        private const val BAND_JUMP_PX = 150
 
         fun startIntent(context: Context): Intent = Intent(context, OverlayService::class.java)
 
@@ -94,6 +102,9 @@ class OverlayService : Service() {
     @Volatile
     private var recorderBase: String? = null
     private var snapshotsTaken = 0
+    private var runSnapshotsTaken = 0
+    private var snapshotIndex = 0
+    private var lastBandY = -1
     private var lastSnapshotNs = 0L
     private var screenWidth = 0
     private var screenHeight = 0
@@ -240,6 +251,9 @@ class OverlayService : Service() {
             }
             engine.scan(warmupS * 1_000_000_000L)
             snapshotsTaken = 0
+            runSnapshotsTaken = 0
+            snapshotIndex = 0
+            lastBandY = -1
             lastSnapshotNs = 0L
             recorder?.event(
                 "auto",
@@ -305,6 +319,20 @@ class OverlayService : Service() {
         scope.launch(engineDispatcher) {
             engine.onTapFired(fireAtNs, sentNs)
             recorder?.tap(sentNs, x, y, fireAtNs, engine.taps)
+            recorder?.event(
+                "auto",
+                String.format(
+                    Locale.US,
+                    "fire tap=%d late_ms=%.2f speed=%.0f frame_err_px=%.1f wait_ms=%.0f lead_ms=%.2f bias_ms=%.2f",
+                    engine.taps,
+                    (sentNs - fireAtNs) / 1e6,
+                    engine.plannedSpeedPxPerSec,
+                    engine.plannedFrameErrorPx,
+                    engine.plannedWaitNs / 1e6,
+                    engine.leadNs / 1e6,
+                    engine.timeBiasNs / 1e6
+                )
+            )
             scheduler?.rearm()
         }
     }
@@ -326,7 +354,18 @@ class OverlayService : Service() {
             vsyncNs = lastVsyncNs,
             framePeriodNs = framePeriodNs
         )
-        if (fireAt >= 0L) scheduler?.plan(fireAt)
+        if (fireAt >= 0L) {
+            scheduler?.plan(fireAt)
+        } else if (fireAt == AutoPlayer.CANCEL && scheduler?.cancel() == true) {
+            recorder?.event("auto", "cancel reason=${engine.lastReason} band_y=${observation.bandCenterY}")
+        }
+        if (engine.state == AutoPlayer.State.RUNNING && lastBandY >= 0 &&
+            abs(observation.bandCenterY - lastBandY) > BAND_JUMP_PX
+        ) {
+            recorder?.event("auto", "band_jump from=$lastBandY to=${observation.bandCenterY}")
+            requestRunSnapshot("band_jump")
+        }
+        lastBandY = observation.bandCenterY
         if (engine.state != before) {
             recorder?.event("auto", "state ${before.name} -> ${engine.state.name}")
             if (engine.state == AutoPlayer.State.SCANNING) scheduler?.cancel()
@@ -341,6 +380,7 @@ class OverlayService : Service() {
                     .putLong(KEY_BIAS, result.timeBiasNs)
                     .apply()
             }
+            if (!result.perfect) requestRunSnapshot("imperfect tap=${result.tapIndex}")
             recorder?.placement(
                 tNs = nowNs,
                 offsetPx = result.offsetPx,
@@ -353,10 +393,12 @@ class OverlayService : Service() {
                 "auto",
                 String.format(
                     Locale.US,
-                    "result tap=%d offset_px=%.1f perfect=%b lead_ms=%.2f bias_ms=%.2f trusted=%b",
+                    "result tap=%d offset_px=%.1f perfect=%b err_ms=%.1f speed=%.0f lead_ms=%.2f bias_ms=%.2f trusted=%b",
                     result.tapIndex,
                     result.offsetPx,
                     result.perfect,
+                    result.errorMs,
+                    result.speedPxPerSec,
                     result.leadNs / 1e6,
                     result.timeBiasNs / 1e6,
                     result.trusted
@@ -385,13 +427,25 @@ class OverlayService : Service() {
 
     /** Skanerlash paytida har [SNAPSHOT_EVERY_NS] da bitta kadr (ko'pi bilan [MAX_SNAPSHOTS]). */
     private fun requestSnapshot(nowNs: Long, force: Boolean) {
-        val base = recorderBase ?: return
         if (snapshotsTaken >= MAX_SNAPSHOTS) return
         if (!force && lastSnapshotNs != 0L && nowNs - lastSnapshotNs < SNAPSHOT_EVERY_NS) return
         lastSnapshotNs = nowNs
         snapshotsTaken++
-        CaptureBus.requestSnapshot(File(File(filesDir, "sessions"), "$base-frame-$snapshotsTaken.png"))
-        recorder?.event("auto", "snapshot $base-frame-$snapshotsTaken.png")
+        saveSnapshot("scan")
+    }
+
+    /** O'yin paytidagi diagnostika kadri ([why] CSV'ga yoziladi). */
+    private fun requestRunSnapshot(why: String) {
+        if (runSnapshotsTaken >= MAX_RUN_SNAPSHOTS) return
+        runSnapshotsTaken++
+        saveSnapshot(why)
+    }
+
+    private fun saveSnapshot(why: String) {
+        val base = recorderBase ?: return
+        snapshotIndex++
+        CaptureBus.requestSnapshot(File(File(filesDir, "sessions"), "$base-frame-$snapshotIndex.png"))
+        recorder?.event("auto", "snapshot $base-frame-$snapshotIndex.png $why")
     }
 
     private fun render() {

@@ -40,10 +40,13 @@ class TapScheduler(
         true
     }
 
-    fun cancel() = synchronized(lock) {
+    /** Rejani bekor qiladi; reja bor edi — true. */
+    fun cancel(): Boolean = synchronized(lock) {
+        val had = plannedAtNs != 0L
         plannedAtNs = 0L
         planId++
         lock.notifyAll()
+        had
     }
 
     /** Oldingi tap natijasi qayd etildi — keyingi rejalar qabul qilinadi. */

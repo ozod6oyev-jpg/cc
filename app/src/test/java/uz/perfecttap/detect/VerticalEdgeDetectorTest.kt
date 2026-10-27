@@ -143,4 +143,31 @@ class VerticalEdgeDetectorTest {
         assertEquals(82f, result.heightPx, 1f)
         assertEquals(86f, result.pitchPx, 1f)
     }
+
+    /**
+     * Shakli blokka o'xshash narsa (kattalashib chiqayotgan yozuv, raqam) bir
+     * necha qadam yuqorida: kutilgan Y oynasidan tashqarida — rad etiladi.
+     */
+    @Test
+    fun expectedCenterWindowRejectsFarBlockLikeShapes() {
+        val rows = 500
+        val pixels = strip(rows) { r ->
+            when (r) {
+                in 20 until 61 -> 200   // blokka o'xshash yozuv (82 px)
+                in 63 until 104 -> 200  // uning ostidagi bo'lak
+                in 233 until 274 -> 60  // harakatlanuvchi blok
+                in 276 until 317 -> 230 // stack
+                in 319 until 360 -> 230
+                else -> 0
+            }
+        }
+        val detector = VerticalEdgeDetector(stripWidth, rowStep, rows, requireBlockBelow = true)
+        detector.expectedHeightPx = 82f
+        detector.expectedPitchPx = 86f
+        assertEquals(20f, detector.detect(pixels)!!.topRow, 0.5f)
+
+        detector.expectedCenterRow = 253.5f
+        detector.maxJumpRows = 86f * 1.5f / rowStep
+        assertEquals(233f, detector.detect(pixels)!!.topRow, 0.5f)
+    }
 }

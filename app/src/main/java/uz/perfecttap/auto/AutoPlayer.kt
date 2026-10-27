@@ -71,6 +71,17 @@ class AutoPlayer(private val config: Config = Config()) {
         val resultDelayNs: Long = 150_000_000L,
         /** Natija uchun ketma-ket shuncha barqaror kadr kerak. */
         val resultStableFrames: Int = 3,
+        /**
+         * Natijadagi xato shuncha kadrdan katta bo'lsa — o'lchov/kuzatuv adashgan,
+         * lead va τ tegilmaydi.
+         */
+        val maxCalibrationErrorFrames: Long = 4L,
+        /**
+         * Blok shuncha ketma-ket kadr joyidan qimirlamasa, u harakatlanuvchi blok
+         * emas (yozuv, raqam yoki qo'yilgan blok): tap rejalashtirilmaydi va
+         * rejadagisi bekor qilinadi.
+         */
+        val staticCancelFrames: Int = 2,
         /** Natija shuncha vaqtda o'lchanmasa, kutish to'xtatiladi. */
         val resultTimeoutNs: Long = 1_500_000_000L,
         /**
@@ -103,7 +114,14 @@ class AutoPlayer(private val config: Config = Config()) {
         val leadNs: Long,
         val timeBiasNs: Long,
         /** Natija o'lchovi ishonchsiz bo'lsa (enlar mos emas) — lead o'zgarmaydi. */
-        val trusted: Boolean
+        val trusted: Boolean,
+        /**
+         * Vaqt xatosi (ms): musbat = kech (blok harakat yo'nalishida oldinga
+         * o'tib ketdi), manfiy = erta. Perfect yoki tezlik noma'lum — NaN.
+         */
+        val errorMs: Float = Float.NaN,
+        /** Tap paytidagi blok tezligi (px/s, ishora = yo'nalish). */
+        val speedPxPerSec: Float = 0f
     )
 
     private val placer = AutoPlacer(cooldownNs = config.settleNs, learnPlayfield = true)
@@ -126,6 +144,7 @@ class AutoPlayer(private val config: Config = Config()) {
     val lastReason: String
         get() = when {
             state != State.RUNNING -> state.name.lowercase()
+            untrackedNotice -> REASON_UNTRACKED
             skippedForFrame -> REASON_FRAME_MISALIGNED
             skippedForBounce -> REASON_THROUGH_BOUNCE
             else -> placer.lastReason
@@ -156,6 +175,13 @@ class AutoPlayer(private val config: Config = Config()) {
     private var refStackLeft = Float.NaN
     private var refStackWidth = Float.NaN
     private var plannedSpeed = 0f
+    /** Oxirgi rejadagi tap paytidagi tezlik (px/s, ishora = yo'nalish). */
+    val plannedSpeedPxPerSec: Float get() = plannedSpeed
+    /** Oxirgi rejadagi tap: tanlangan kadrdagi kutilgan xato (px) va kutilgan vaqt. */
+    var plannedFrameErrorPx = 0f
+        private set
+    var plannedWaitNs = 0L
+        private set
     private var pendingResult = false
     private var pendingTapNs = 0L
     private var pendingRefLeft = Float.NaN
@@ -166,6 +192,9 @@ class AutoPlayer(private val config: Config = Config()) {
     private var resultStable = 0
     private var resultCandidateWidth = Float.NaN
     private var prevCenter = Float.NaN
+    private var staticFrames = 0
+    private var missedFrames = 0
+    private var untrackedNotice = false
 
     /** Oldingi sessiyada o'rganilgan qiymatlar (xizmat saqlab qo'yadi). */
     fun restoreCalibration(leadNs: Long, timeBiasNs: Long) {
@@ -230,7 +259,8 @@ class AutoPlayer(private val config: Config = Config()) {
 
     /**
      * Bitta kamera kadri (ekran pikselida). Tap kerak bo'lsa, uni yuborish
-     * vaqtini (`System.nanoTime()`) qaytaradi, aks holda -1.
+     * vaqtini (`System.nanoTime()`) qaytaradi, aks holda -1; [CANCEL] — kuzatuv
+     * harakatlanuvchi blokdan ajraldi, rejadagi tap bekor qilinishi kerak.
      *
      * [vsyncNs] / [framePeriodNs] — displey kadr panjarasi (`<= 0` = noma'lum):
      * o'yin bosishni kadr chegarasida qabul qiladi, shuning uchun blok stack
@@ -280,6 +310,13 @@ class AutoPlayer(private val config: Config = Config()) {
         // kamera surilishi paytidagi kadrlar natijani buzmaydi.
         val center = (left + right) * 0.5f
         val moving = seen && !prevCenter.isNaN() && abs(center - prevCenter) > 0.5f
+        // Joyida turgan yoki ko'rinmay qolgan blok: kuzatuv harakatlanuvchi
+        // blokda emas. Kamera kadri ba'zan takrorlanadi (bir xil L), shuning
+        // uchun bir nechta ketma-ket kadr talab qilinadi.
+        staticFrames = if (hasBlock && !prevCenter.isNaN() && abs(center - prevCenter) <= 0.5f) {
+            staticFrames + 1
+        } else if (hasBlock) 0 else staticFrames
+        missedFrames = if (hasBlock) 0 else missedFrames + 1
         prevCenter = if (hasBlock) center else Float.NaN
         if (pendingResult && nowNs - pendingTapNs >= config.resultDelayNs && moving) {
             if (!resultCandidateWidth.isNaN() && abs(stackWidth - resultCandidateWidth) <= 2f) {
@@ -298,19 +335,19 @@ class AutoPlayer(private val config: Config = Config()) {
             refStackLeft = stackLeft
             refStackWidth = stackWidth
         }
+        val untracked = staticFrames >= config.staticCancelFrames ||
+            missedFrames >= config.staticCancelFrames + 1
+        if (state == State.RUNNING && untracked) {
+            // Eski bashorat bo'yicha rejalashtirilgan tap endi ishonchsiz.
+            if (hasBlock && width > 1f) feedPlacer(left, right, width, hasStack, stackLeft, stackRight, imageTimestampNs, nowNs, screenWidthPx)
+            frameWaitSinceNs = 0L
+            untrackedNotice = true
+            return CANCEL
+        }
+        untrackedNotice = false
         if (!hasBlock || width <= 1f) return -1L
 
-        val decision = placer.onObservation(
-            centerX = (left + right) * 0.5f,
-            widthPx = width,
-            stackLeft = if (hasStack) stackLeft else 0f,
-            stackRight = if (hasStack) stackRight else 0f,
-            contentTimestampNs = imageTimestampNs - config.streamDelayNs,
-            arrivalNs = nowNs,
-            // Pozitsiya tap o'yinga yetib boradigan paytga bashorat qilinadi.
-            nowNs = nowNs + leadNs,
-            screenWidthPx = screenWidthPx
-        )
+        val decision = feedPlacer(left, right, width, hasStack, stackLeft, stackRight, imageTimestampNs, nowNs, screenWidthPx)
         skippedForFrame = false
         skippedForBounce = false
         if (framePeriodNs > 0L) lastFramePeriodNs = framePeriodNs
@@ -343,8 +380,32 @@ class AutoPlayer(private val config: Config = Config()) {
             return -1L
         }
         plannedSpeed = placer.speedPxPerSec
+        plannedFrameErrorPx = frameErrorPx
+        plannedWaitNs = waitedNs
         return maxOf(nowNs, targetNs - leadNs)
     }
+
+    private fun feedPlacer(
+        left: Float,
+        right: Float,
+        width: Float,
+        hasStack: Boolean,
+        stackLeft: Float,
+        stackRight: Float,
+        imageTimestampNs: Long,
+        nowNs: Long,
+        screenWidthPx: Float
+    ) = placer.onObservation(
+        centerX = (left + right) * 0.5f,
+        widthPx = width,
+        stackLeft = if (hasStack) stackLeft else 0f,
+        stackRight = if (hasStack) stackRight else 0f,
+        contentTimestampNs = imageTimestampNs - config.streamDelayNs,
+        arrivalNs = nowNs,
+        // Pozitsiya tap o'yinga yetib boradigan paytga bashorat qilinadi.
+        nowNs = nowNs + leadNs,
+        screenWidthPx = screenWidthPx
+    )
 
     /** Tap haqiqatan yuborildi ([fireAtNs] — rejalashtirilgan payt). */
     fun onTapFired(fireAtNs: Long, nowNs: Long) {
@@ -366,6 +427,10 @@ class AutoPlayer(private val config: Config = Config()) {
     companion object {
         /** Eng yaqin kadr perfect zonaga tushmaydi — keyingi qaytish kutiladi. */
         const val REASON_FRAME_MISALIGNED = "kadr_mos_emas"
+        /** Kuzatuv harakatlanuvchi blokda emas — rejadagi tap bekor qilinadi. */
+        const val REASON_UNTRACKED = "kuzatuv_yoq"
+        /** [onFrame] qiymati: rejalashtirilgan tapni bekor qilish kerak. */
+        const val CANCEL = -2L
         /** Bashorat chetdan qaytish orqali — qaytishdan keyingi kadr kutiladi. */
         const val REASON_THROUGH_BOUNCE = "qaytish_ichida"
     }
@@ -414,7 +479,7 @@ class AutoPlayer(private val config: Config = Config()) {
         val trusted = shrink > -config.perfectWidthTolerancePx && shrink < refWidth * 0.5f
         if (shrink <= config.perfectWidthTolerancePx) {
             perfectCount++
-            result = Result(taps, 0f, true, stackWidth, leadNs, timeBiasNs, trusted)
+            result = Result(taps, 0f, true, stackWidth, leadNs, timeBiasNs, trusted, Float.NaN, pendingSpeed)
             return
         }
         imperfectCount++
@@ -436,10 +501,12 @@ class AutoPlayer(private val config: Config = Config()) {
             } else {
                 0L
             }
-            // Bir kadrdan ko'p xato — kalibrovka emas, kuzatuv/aniqlash xatosi
-            // (masalan, yozuv blok deb olingan): lead va τ tegilmaydi.
-            if (abs(frames) > 1L) {
-                result = Result(taps, offset, false, stackWidth, leadNs, timeBiasNs, false)
+            // Juda katta xato — kalibrovka emas, kuzatuv/aniqlash xatosi (masalan,
+            // yozuv blok deb olingan): lead va τ tegilmaydi. Haqiqiy o'yinda
+            // noto'g'ri saqlangan τ 2-4 kadrlik muntazam xato beradi — u o'rganilishi
+            // shart, shuning uchun chegara bir kadr emas, [maxCalibrationErrorFrames].
+            if (abs(frames) > config.maxCalibrationErrorFrames) {
+                result = Result(taps, offset, false, stackWidth, leadNs, timeBiasNs, false, errorMs(offset, speed), speed)
                 return
             }
             val residualNs = errorNs - frames * period
@@ -447,12 +514,21 @@ class AutoPlayer(private val config: Config = Config()) {
                 .coerceIn(-config.maxBiasStepNs, config.maxBiasStepNs)
             timeBiasNs = (timeBiasNs + step).coerceIn(-config.maxBiasNs, config.maxBiasNs)
             if (frames != 0L) {
-                var lead = leadNs + frames * period / 2
-                while (lead > config.maxLeadNs) lead -= period
-                while (lead < config.minLeadNs) lead += period
-                leadNs = lead
+                // Lead chegaradan chiqsa, tuzatish τ ga o'tadi: avval lead bir
+                // davrga «aylanib» qaytardi va tuzatish yo'qolardi (lead 0 da
+                // turganda erta tushish hech qachon to'g'rilanmasdi).
+                val shift = frames * period / 2
+                val lead = leadNs + shift
+                if (lead in config.minLeadNs..config.maxLeadNs) {
+                    leadNs = lead
+                } else {
+                    timeBiasNs = (timeBiasNs + shift).coerceIn(-config.maxBiasNs, config.maxBiasNs)
+                }
             }
         }
-        result = Result(taps, offset, false, stackWidth, leadNs, timeBiasNs, trusted)
+        result = Result(taps, offset, false, stackWidth, leadNs, timeBiasNs, trusted, errorMs(offset, speed), speed)
     }
+
+    private fun errorMs(offset: Float, speed: Float): Float =
+        if (abs(speed) > 1f) offset / speed * 1000f else Float.NaN
 }

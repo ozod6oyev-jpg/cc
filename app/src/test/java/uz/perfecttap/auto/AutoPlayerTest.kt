@@ -223,4 +223,45 @@ class AutoPlayerTest {
         assertTrue(player.lostNotice)
         assertFalse(player.start(t))
     }
+
+    /**
+     * Haqiqiy sessiya (135243): buzilgan sessiyadan saqlangan τ = +13 ms
+     * bloklarni muntazam erta tushirdi, xatolar esa «ishonchsiz» deb
+     * o'rganilmadi. Endi bir necha natijada to'g'rilanishi kerak.
+     */
+    @Test
+    fun recoversFromACorruptedSavedCalibration() {
+        val loop = Loop(inputLatencyMs = 8.0)
+        loop.player.restoreCalibration(8 * ms, 13_350_000L)
+        loop.player.scan(0L)
+        loop.run(1.0)
+        loop.player.start(loop.nowNs)
+        loop.run(60.0)
+        val tail = loop.offsets.drop(15)
+        val perfect = tail.count { abs(it) <= 6f }
+        println("corrupted: lead=${loop.player.leadNs / 1e6} bias=${loop.player.timeBiasNs / 1e6} perfect=$perfect/${tail.size}")
+        assertTrue("perfect=$perfect/${tail.size}", perfect >= tail.size * 85 / 100)
+    }
+
+    /** Kuzatuv joyida turgan narsaga (hisob raqami, yozuv) o'tdi — tap bekor. */
+    @Test
+    fun staticTargetCancelsThePlannedTap() {
+        val player = AutoPlayer()
+        player.scan(0L)
+        var t = 0L
+        var x = 300f
+        repeat(60) {
+            t += 8 * ms
+            x += 10f
+            player.onFrame(true, x, x + 600f, true, 240f, 840f, t, t, 1080f)
+        }
+        assertTrue(player.start(t))
+        var last = 0L
+        repeat(4) {
+            t += 8 * ms
+            last = player.onFrame(true, 584f, 696f, true, 396f, 507f, t, t, 1080f)
+        }
+        assertEquals(AutoPlayer.CANCEL, last)
+        assertEquals(AutoPlayer.REASON_UNTRACKED, player.lastReason)
+    }
 }

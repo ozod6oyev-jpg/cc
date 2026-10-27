@@ -72,6 +72,8 @@ class CaptureService : Service() {
         private const val STUCK_FRAMES = 6
         /** Blok shuncha vaqt ichida siljigan bo'lsa, u kuzatuvda hisoblanadi. */
         private const val MOVING_LOCK_NS = 400_000_000L
+        /** Kuzatuv yo'qolganda tasma sinab ko'riladigan X nuqtalar (ekran eniga nisbatan). */
+        private val SEARCH_X = floatArrayOf(0.5f, 0.35f, 0.65f, 0.2f, 0.8f)
 
         fun startIntent(
             context: Context,
@@ -149,6 +151,8 @@ class CaptureService : Service() {
     private var autoHeightPx = 0f
     /** Harakatlanuvchi blok oxirgi marta joyidan siljigan payt. */
     private var lastMovingNs = 0L
+    /** Tagida eni teng stack oxirgi marta o'lchangan payt. */
+    private var lastStackMatchNs = 0L
 
     /** Oxirgi o'lchangan blok markazi va u joyida turgan kadrlar soni. */
     private var lastCenterX = Float.NaN
@@ -268,6 +272,7 @@ class CaptureService : Service() {
         autoPitchPx = 0f
         autoHeightPx = 0f
         lastMovingNs = 0L
+        lastStackMatchNs = 0L
         lastCenterX = Float.NaN
         staticFrames = 0
         bandLuminance = 0f
@@ -358,14 +363,19 @@ class CaptureService : Service() {
                     imageHeight = image.height
                 )
                 if (stripRows == strip.rows) {
-                    val found = vertical.detect(strip.pixels)
+                    var found = vertical.detect(strip.pixels)
                     stripLuminance = vertical.lastMeanLum
                     stripMaxLuminance = vertical.lastMaxLum
+                    val locked = wholeScreen() && autoLockFresh()
+                    if (found == null && wholeScreen() && !locked) {
+                        // Ishonchli kuzatuv yo'q: tasma noto'g'ri narsa (masalan hisob
+                        // raqami) ustida qolib ketmasin — boshqa X nuqtalarda qidiramiz.
+                        found = searchStrip(strip, vertical, plane, image.width, image.height)
+                    }
                     val center = found?.let { strip.startY + it.centerRow * strip.rowStep } ?: 0f
                     // Avto rejim: harakatlanuvchi blok kuzatilayotgan bo'lsa, undan
                     // pastdagi nomzod — stackning o'zi (blok stack ustida emas), rad.
-                    val belowTracked = found != null && wholeScreen() &&
-                        System.nanoTime() - lastMovingNs < MOVING_LOCK_NS &&
+                    val belowTracked = found != null && locked &&
                         center > bandCenterY + autoHeightPx * 0.5f
                     if (found != null && !belowTracked) {
                         bandCenterY = center.roundToInt().coerceIn(BAND_HEIGHT / 2, bandLimitY())
@@ -486,6 +496,11 @@ class CaptureService : Service() {
                         stackHas = true
                         stackLeft = stack.bestLeft
                         stackRight = stack.bestRight
+                        // Kuzatuv faqat tagida eni teng stack bo'lsa ishonchli (1x1).
+                        val movingWidth = blockRight - blockLeft
+                        if (hasBlock && abs(movingWidth - stack.bestWidth) <= stack.bestWidth * 0.15f) {
+                            lastStackMatchNs = System.nanoTime()
+                        }
                     }
                 }
 
@@ -584,6 +599,39 @@ class CaptureService : Service() {
 
     /** ROI = 0: avto-kliker butun ekranda, haqiqiy o'yin ustida. */
     private fun wholeScreen(): Boolean = roiBottomY == 0
+
+    /**
+     * Avto rejimda kuzatuv ishonchli: blok yaqinda siljigan **va** uning tagida
+     * eni teng stack o'lchangan. Hisob raqami o'zgarib «siljisa» ham, tagida
+     * stack yo'q — u kuzatuvni ushlab qololmaydi.
+     */
+    private fun autoLockFresh(): Boolean {
+        val now = System.nanoTime()
+        return now - lastMovingNs < MOVING_LOCK_NS && now - lastStackMatchNs < MOVING_LOCK_NS
+    }
+
+    /**
+     * Tasmani bir nechta X nuqtada sinaydi; birinchi topilganini qaytaradi va
+     * tasmani o'sha joyga ko'chiradi.
+     */
+    private fun searchStrip(
+        strip: VerticalStripReader,
+        vertical: VerticalEdgeDetector,
+        plane: android.media.Image.Plane,
+        width: Int,
+        height: Int
+    ): VerticalEdgeDetector.Result? {
+        for (fraction in SEARCH_X) {
+            val x = (width * fraction).roundToInt()
+            if (abs(x - stripCenterX) < STRIP_WIDTH / 2) continue
+            val read = strip.read(plane.buffer, plane.rowStride, plane.pixelStride, x, width, height)
+            if (read != strip.rows) continue
+            val found = vertical.detect(strip.pixels) ?: continue
+            stripCenterX = x
+            return found
+        }
+        return null
+    }
 
     /**
      * Tahlil hududining pastki chegarasi (kadr markazi uchun): panel tepasi

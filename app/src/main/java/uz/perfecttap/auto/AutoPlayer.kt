@@ -15,8 +15,8 @@ import kotlin.math.roundToLong
  *  · [State.WARMUP]   — qizib olish (tanlangan bo'lsa): tezlik o'rganiladi,
  *    tap yuborilmaydi, «Boshlash» hali faol emas;
  *  · [State.READY]    — maydon topildi va qizildi: faqat shunda «Boshlash» faol;
- *  · [State.RUNNING]  — har qo'yishdan keyin [Config.settleNs] (1 s) kutadi,
- *    keyin blok perfect zonaga kelgan paytga tap rejalashtiradi.
+ *  · [State.RUNNING]  — yangi blok perfect zonaga kelishi bilan tap
+ *    rejalashtiradi (qo'yishlar orasida qo'shimcha kutish yo'q).
  *
  * Maydon [Config.lostTimeoutNs] ko'rinmasa (o'yin tugadi, menyu ochildi),
  * qayta skanerlashga o'tiladi ([lostNotice]) — «Boshlash» yana o'chadi.
@@ -34,8 +34,12 @@ import kotlin.math.roundToLong
 class AutoPlayer(private val config: Config = Config()) {
 
     data class Config(
-        /** Qo'yishdan keyin keyingi tapgacha kutish (o'yin animatsiyasi tinchisin). */
-        val settleNs: Long = 1_000_000_000L,
+        /**
+         * Qo'yishdan keyin keyingi tapgacha eng kam oraliq — faqat bir blokka
+         * ikki tap ketmasligi uchun. Qo'shimcha kutish yo'q: yangi blok perfect
+         * zonaga kelishi bilan bosiladi.
+         */
+        val settleNs: Long = 120_000_000L,
         /** Kadr kontenti kadr vaqtidan shuncha oldingi holat (labda o'lchangan Δ_stream). */
         val streamDelayNs: Long = 27_000_000L,
         /** Tap yuborilgandan o'yin uni qabul qilguncha (Δ_input + kadr chegarasi). */
@@ -61,7 +65,9 @@ class AutoPlayer(private val config: Config = Config()) {
         /** Blok yoki stack shuncha vaqt ko'rinmasa — qayta skanerlash. */
         val lostTimeoutNs: Long = 4_000_000_000L,
         /** Natija (yangi stack eni) tapdan shuncha keyin o'lchanadi. */
-        val resultDelayNs: Long = 600_000_000L,
+        val resultDelayNs: Long = 300_000_000L,
+        /** Natija shuncha vaqtda o'lchanmasa, kutish to'xtatiladi. */
+        val resultTimeoutNs: Long = 1_500_000_000L,
         /**
          * Eng yaqin displey kadrida blok stack markazidan shundan uzoq bo'lsa,
          * bu o'tish tashlab yuboriladi va blokning keyingi qaytishi kutiladi.
@@ -262,7 +268,7 @@ class AutoPlayer(private val config: Config = Config()) {
 
         if (pendingResult && nowNs - pendingTapNs >= config.resultDelayNs && hasStack && stackWidth > 1f) {
             measureResult(stackLeft, stackWidth)
-        } else if (pendingResult && nowNs - pendingTapNs > config.settleNs * 2) {
+        } else if (pendingResult && nowNs - pendingTapNs > config.resultTimeoutNs) {
             // Stack ko'rinmadi: natijasiz davom etamiz, aks holda tap to'xtab qoladi.
             pendingResult = false
         }
@@ -287,7 +293,7 @@ class AutoPlayer(private val config: Config = Config()) {
         skippedForFrame = false
         skippedForBounce = false
         if (framePeriodNs > 0L) lastFramePeriodNs = framePeriodNs
-        if (state != State.RUNNING || pendingResult || decision.scheduleInNs < 0L) return -1L
+        if (state != State.RUNNING || decision.scheduleInNs < 0L) return -1L
         if (decision.throughBounce) {
             // Keyingi kadrlar qaytishdan keyingi holatni ko'rsatadi — o'shani kutamiz.
             skippedForBounce = true
@@ -324,10 +330,13 @@ class AutoPlayer(private val config: Config = Config()) {
         taps++
         frameWaitSinceNs = 0L
         placer.onPlaced(nowNs, placedAtNs = fireAtNs + leadNs)
+        // Oldingi natija hali o'lchanmagan bo'lsa (bloklar tez ketma-ket), uning
+        // tapdan oldingi stacki ham eskirgan: bu tap natijasi o'lchanmaydi.
+        val refValid = !pendingResult
         pendingResult = true
         pendingTapNs = nowNs
-        pendingRefLeft = refStackLeft
-        pendingRefWidth = refStackWidth
+        pendingRefLeft = if (refValid) refStackLeft else Float.NaN
+        pendingRefWidth = if (refValid) refStackWidth else Float.NaN
         pendingSpeed = plannedSpeed
     }
 

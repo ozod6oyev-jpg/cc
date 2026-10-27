@@ -149,7 +149,7 @@ class AutoPlayerTest {
     }
 
     @Test
-    fun placesPerfectlyAndWaitsASecondBetweenBlocks() {
+    fun placesPerfectlyAsSoonAsTheBlockIsInTheZone() {
         val loop = Loop(inputLatencyMs = 8.0)
         loop.player.scan(0L)
         loop.run(1.0)
@@ -161,8 +161,8 @@ class AutoPlayerTest {
         val perfect = tail.count { abs(it) <= 6f }
         println("auto: errors at " + loop.offsets.withIndex().filter { abs(it.value) > 6f }.map { "${it.index}:${it.value.toInt()}" })
         println("auto: perfect=$perfect/${tail.size} of ${loop.offsets.size} lead=${loop.player.leadNs / 1e6} bias=${loop.player.timeBiasNs / 1e6}")
-        // Har qo'yishdan keyin 1 s kutiladi: 90 s da 90 tadan kam blok.
-        assertTrue("placements=${loop.offsets.size}", loop.offsets.size in 40..89)
+        // Qo'shimcha kutish yo'q: 90 s da ko'p blok qo'yiladi.
+        assertTrue("placements=${loop.offsets.size}", loop.offsets.size >= 120)
         assertTrue("perfect=$perfect/${tail.size}", perfect >= tail.size * 90 / 100)
     }
 

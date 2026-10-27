@@ -172,4 +172,22 @@ class GameScreenshotDetectionTest {
 
         assertEquals(null, verticalAt(file, 840))
     }
+
+    /**
+     * Haqiqiy sessiya (81-blok, baland stack): kuzatuv «81» hisobidagi «1»
+     * raqamiga (x 579..691) yopishib, tasma o'sha X da qolgan — u yerda stack
+     * faqat chetdan tegadi va maydon topilmaydi. CaptureService shunda tasmani
+     * boshqa X nuqtalarda (0.5, 0.35, ...) qidiradi: ekran markazida harakatlanuvchi
+     * blok (1152..1232) va uning tagidagi ko'p qavatli stack aniq topiladi.
+     */
+    @Test
+    fun tallStackIsFoundWhenTheStripLeavesTheScoreDigit() {
+        val file = screenshot("auto-20261027-091338-frame-1.png")
+        assertEquals(null, verticalAt(file, 635))
+        val atCenter = verticalAt(file, 540)
+        assertNotNull(atCenter)
+        assertEquals(1152f, atCenter!!.topRow, 6f)
+        assertEquals(1232f, atCenter.bottomRow, 6f)
+        assertEquals(86f, atCenter.pitchPx, 6f)
+    }
 }

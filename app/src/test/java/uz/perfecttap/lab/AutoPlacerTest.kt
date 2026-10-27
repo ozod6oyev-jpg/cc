@@ -42,14 +42,21 @@ class AutoPlacerTest {
         return this
     }
 
+    /**
+     * A full speed window of steady motion that ends at [endX] at [endMs]:
+     * [stepPx] per 25 ms frame (positive = moving right).
+     */
+    private fun AutoPlacer.sweepTo(endX: Float, endMs: Long, stepPx: Float): AutoPlacer.Decision {
+        val last = AutoPlacer.SAMPLES - 1
+        for (k in 0 until last) observe(endX - stepPx * (last - k), endMs - 25L * (last - k))
+        return observe(endX, endMs)
+    }
+
     @Test
     fun schedulesWhenTheBlockReachesTheStackCentre() {
         val placer = AutoPlacer().warmUp()
-        placer.observe(540f, 0)
         // Approaching from the left with a positive velocity.
-        placer.observe(530f, 50)
-        placer.observe(535f, 75)
-        val decision = placer.observe(540f, 100)
+        val decision = placer.sweepTo(540f, 200, stepPx = 5f)
 
         assertEquals(540f, placer.stackCenterX, 0.01f)
         assertEquals(0L, decision.scheduleInNs)
@@ -59,9 +66,7 @@ class AutoPlacerTest {
     fun schedulesAheadOfTimeWhenTheCrossingIsAFewMsAway() {
         val placer = AutoPlacer().warmUp()
         // -320 px/s across a full speed window; the last frame is 0.4 px short.
-        val last = AutoPlacer.SAMPLES - 1
-        for (k in 0 until last) placer.observe(540.4f + 8f * (last - k), k * 25L)
-        val decision = placer.observe(540.4f, last * 25L)
+        val decision = placer.sweepTo(540.4f, 200, stepPx = -8f)
 
         assertTrue("schedule=${decision.scheduleInNs}", decision.scheduleInNs in 1..20 * ms)
     }
@@ -167,13 +172,23 @@ class AutoPlacerTest {
     @Test
     fun reportsScheduledWhenATapIsPlanned() {
         val placer = AutoPlacer().warmUp()
-        placer.observe(540f, 0)
-        placer.observe(530f, 50)
-        placer.observe(535f, 75)
-        val decision = placer.observe(540f, 100)
+        val decision = placer.sweepTo(540f, 200, stepPx = 5f)
 
         assertTrue(decision.scheduleInNs >= 0L)
         assertEquals(AutoPlacer.REASON_SCHEDULED, placer.lastReason)
+    }
+
+    /** Lab sessiyasidagi xato: chetdan qaytishda tezlik bahosi sakrab, tap kechikardi. */
+    @Test
+    fun aBounceKeepsTheSpeedAndOnlyFlipsTheDirection() {
+        val placer = AutoPlacer().warmUp()
+        // +20 px per 8 ms (2500 px/s) towards the right edge, clamped there, back.
+        for (k in 0..7) placer.observe(552f + 20f * k, 200L + 8L * k)
+        placer.observe(700f, 264) // clamped to the edge: only +8 px
+        placer.observe(680f, 272)
+        placer.observe(660f, 280)
+
+        assertEquals(-2500f, placer.speedPxPerSec, 1f)
     }
 
     @Test

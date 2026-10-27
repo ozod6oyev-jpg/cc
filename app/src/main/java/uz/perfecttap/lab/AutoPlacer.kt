@@ -48,6 +48,10 @@ class AutoPlacer(
     private val sampleX = FloatArray(SAMPLES)
     private val sampleNs = LongArray(SAMPLES)
     private var sampleCount = 0
+    /** Tezlik kattaligi shu blok uchun to'liq oyna bo'yicha o'lchangan. */
+    private var speedKnown = false
+    /** Joriy harakat yo'nalishi (+1 / -1; 0 = hali noma'lum). */
+    private var legDirection = 0
     private var observations = 0
     private var lastPlaceArrivalNs = Long.MIN_VALUE / 2
     private var placedOnce = false
@@ -64,6 +68,8 @@ class AutoPlacer(
         prevX = Float.NaN
         prevContentNs = 0L
         sampleCount = 0
+        speedKnown = false
+        legDirection = 0
         observations = 0
         lastPlaceArrivalNs = Long.MIN_VALUE / 2
         placedOnce = false
@@ -124,7 +130,7 @@ class AutoPlacer(
         // Right after a placement (and at session start) there is no usable speed
         // yet: one frame of movement can be a bounce. Waiting for the full window
         // costs a couple of frames but removes the first-cut mistakes.
-        if (sampleCount < SAMPLES) {
+        if (!speedKnown) {
             lastReason = REASON_SAMPLES
             return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
         }
@@ -162,16 +168,34 @@ class AutoPlacer(
 
     /**
      * Velocity from the frame's own timestamps (the pipeline delivers frames in
-     * bursts, so arrival deltas would be noise). A 3-sample least-squares fit is
-     * used while it agrees with the newest pair; a bounce inside the window breaks
-     * that agreement and the newest pair wins.
+     * bursts, so arrival deltas would be noise).
+     *
+     * A block keeps the same speed until it is placed; at the playfield edge only
+     * the direction flips. So the magnitude is fitted over samples of one leg,
+     * and a bounce keeps it, flips the sign and starts a new leg from the newest
+     * sample. A fit across a bounce (or across the frame where the block is
+     * clamped to the edge) would mix the two legs and give a wrong, jumping
+     * speed — which in the lab moved the tap by a whole frame.
      */
     private fun updateSpeed(contentTimestampNs: Long, centerX: Float) {
         if (!prevX.isNaN()) {
             val dt = (contentTimestampNs - prevContentNs) / 1_000_000_000f
-            when {
-                dt in 0.004f..0.25f -> speedPxPerSec = (centerX - prevX) / dt
-                dt > 0.25f -> speedPxPerSec = 0f
+            val dx = centerX - prevX
+            if (dt > 0.25f) {
+                // Long gap: the motion may have changed in any way.
+                sampleCount = 0
+                speedKnown = false
+                speedPxPerSec = 0f
+                legDirection = 0
+            } else if (dt > 0f && abs(dx) >= BOUNCE_MIN_PX) {
+                val pairDirection = if (dx > 0f) 1 else -1
+                if (legDirection != 0 && pairDirection != legDirection) {
+                    // Bounce: same speed, other direction, new leg.
+                    if (speedKnown) speedPxPerSec = -speedPxPerSec
+                    sampleCount = 0
+                }
+                legDirection = pairDirection
+                if (!speedKnown && dt >= 0.004f) speedPxPerSec = dx / dt
             }
         }
         prevX = centerX
@@ -190,15 +214,20 @@ class AutoPlacer(
             sampleNs[SAMPLES - 1] = contentTimestampNs
         }
 
-        if (sampleCount < SAMPLES) return
+        if (sampleCount < MIN_FIT_SAMPLES) return
         val fit = fitVelocity()
         if (fit == 0f) return
-        // Residual of the newest sample against the fitted line (which passes
-        // through the sample means): a bounce shows up here.
-        val predictedNewest = fitMeanX +
-            fit * ((sampleNs[SAMPLES - 1] - fitMeanNs) / 1_000_000_000.0).toFloat()
-        if (abs(predictedNewest - sampleX[SAMPLES - 1]) <= FIT_TOLERANCE_PX) {
+        // Every sample must sit on the fitted line: an edge-clamped frame or a
+        // mismatched timestamp shows up as a large residual and is not trusted.
+        var worst = 0f
+        for (i in 0 until sampleCount) {
+            val onLine = fitMeanX + fit * ((sampleNs[i] - fitMeanNs) / 1_000_000_000.0).toFloat()
+            worst = maxOf(worst, abs(onLine - sampleX[i]))
+        }
+        if (worst > FIT_TOLERANCE_PX) return
+        if (speedKnown || sampleCount >= SAMPLES) {
             speedPxPerSec = fit
+            speedKnown = true
         }
     }
 
@@ -255,6 +284,8 @@ class AutoPlacer(
         prevX = Float.NaN
         prevContentNs = 0L
         sampleCount = 0
+        speedKnown = false
+        legDirection = 0
         speedPxPerSec = 0f
     }
 
@@ -277,6 +308,10 @@ class AutoPlacer(
         const val SAMPLES = 6
         /** Observations the tracker wants before its first placement. */
         const val WARMUP_OBSERVATIONS = 10
-        const val FIT_TOLERANCE_PX = 12f
+        const val FIT_TOLERANCE_PX = 3f
+        /** Shuncha namuna bo'lsa, ma'lum tezlik yangi oyoqda aniqlashtiriladi. */
+        private const val MIN_FIT_SAMPLES = 3
+        /** Yo'nalish almashinuvi shovqin emas, deb hisoblanadigan siljish. */
+        private const val BOUNCE_MIN_PX = 2f
     }
 }

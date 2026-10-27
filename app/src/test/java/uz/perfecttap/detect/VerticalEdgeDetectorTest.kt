@@ -1,0 +1,118 @@
+package uz.perfecttap.detect
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class VerticalEdgeDetectorTest {
+
+    private val stripWidth = 5
+    private val rowStep = 2
+
+    /** Builds a strip where each sampled row has the given luminance. */
+    private fun strip(rows: Int, luma: (row: Int) -> Int): IntArray {
+        val pixels = IntArray(stripWidth * rows)
+        for (r in 0 until rows) {
+            val v = luma(r).coerceIn(0, 255)
+            for (c in 0 until stripWidth) {
+                pixels[r * stripWidth + c] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+            }
+        }
+        return pixels
+    }
+
+    @Test
+    fun findsTopAndBottomOfMovingBlock() {
+        val rows = 200
+        // Block from y=200..290 px, i.e. rows 100..145.
+        val pixels = strip(rows) { r ->
+            when {
+                r < 100 -> 8
+                r < 145 -> 230
+                else -> 70
+            }
+        }
+        val detector = VerticalEdgeDetector(stripWidth, rowStep, rows)
+        val result = detector.detect(pixels)!!
+
+        assertEquals(100f, result.topRow, 1.0f)
+        assertEquals(145f, result.bottomRow, 1.0f)
+        assertEquals(122.5f, result.centerRow, 1.0f)
+        assertEquals(90f, result.heightPx, 2f)
+        assertEquals(244.5f, result.centerRow * rowStep, 2f)
+    }
+
+    @Test
+    fun returnsFirstPairNotLowerStackEdges() {
+        val rows = 220
+        // Moving block rows 100..145, then stack edges every ~45 rows.
+        val pixels = strip(rows) { r ->
+            when {
+                r < 100 -> 8
+                r < 145 -> 230
+                r < 160 -> 70
+                r < 205 -> 40
+                else -> 90
+            }
+        }
+        val detector = VerticalEdgeDetector(stripWidth, rowStep, rows)
+        val result = detector.detect(pixels)!!
+
+        assertEquals(100f, result.topRow, 1.0f)
+        assertEquals(145f, result.bottomRow, 1.0f)
+    }
+
+    @Test
+    fun findsLowContrastBoundaryBelowWhiteBlock() {
+        val rows = 200
+        // White moving block on a light-gray top block: the boundary is only 23 levels.
+        val pixels = strip(rows) { r ->
+            when {
+                r < 100 -> 8
+                r < 145 -> 255
+                else -> 232
+            }
+        }
+        val detector = VerticalEdgeDetector(stripWidth, rowStep, rows)
+        val result = detector.detect(pixels)!!
+
+        assertEquals(100f, result.topRow, 1.0f)
+        assertEquals(145f, result.bottomRow, 1.5f)
+    }
+
+    @Test
+    fun flatStripHasNoResult() {
+        val detector = VerticalEdgeDetector(stripWidth, rowStep, 100)
+        assertNull(detector.detect(strip(100) { 120 }))
+        assertEquals(0, detector.lastPeaks)
+    }
+
+    @Test
+    fun ignoresTooThinBlock() {
+        // 10 px tall block is below the 30 px minimum.
+        val rows = 100
+        val pixels = strip(rows) { r -> if (r in 40..44) 250 else 5 }
+        val detector = VerticalEdgeDetector(stripWidth, rowStep, rows)
+        assertNull(detector.detect(pixels))
+    }
+
+    @Test
+    fun handlesFractionalBlockBoundary() {
+        val rows = 200
+        // Soft top edge: row 100 is half covered, 101 is full.
+        val pixels = strip(rows) { r ->
+            when {
+                r < 100 -> 10
+                r == 100 -> 120
+                r < 146 -> 230
+                else -> 70
+            }
+        }
+        val detector = VerticalEdgeDetector(stripWidth, rowStep, rows)
+        val result = detector.detect(pixels)!!
+
+        assertTrue(result.topRow in 99.5f..101.5f)
+        assertEquals(146f, result.bottomRow, 1.2f)
+    }
+}

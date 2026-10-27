@@ -1,0 +1,256 @@
+package uz.perfecttap.lab
+
+import kotlin.math.abs
+
+/**
+ * Avtomatik "1x1" qo'yish qarori — **faqat kameradan ko'ringan** ma'lumot bilan.
+ *
+ * Har kadrda ikkita o'lchov keladi: harakatlanayotgan blokning markazi va eni,
+ * hamda uning ostidagi (stack) blokning chap/o'ng qirralari. Shu ikkisidan
+ * tezlik hisoblanadi, kadr kontentining yoshi (hozirgi vaqt - kadrda ko'ringan
+ * holat vaqti) uchun pozitsiya oldindan aytiladi va blok stack markazidan
+ * o'tadigan **aniq vaqt** qaytariladi. Qo'yish shu vaqtda bajarilsa, ofset
+ * nolga yaqin bo'ladi — ya'ni perfect.
+ *
+ * Hech qanday o'yin ichki holati ishlatilmaydi, shuning uchun laboratoriya
+ * natijalarni "aldab" ko'rsatmaydi.
+ */
+class AutoPlacer(
+    private val cooldownNs: Long = 150_000_000L,
+    private val maxScheduleNs: Long = 60_000_000L,
+    private val maxPredictionNs: Long = 600_000_000L,
+    private val minSpeedPxPerSec: Float = 25f
+) {
+
+    /** [scheduleInNs] — qo'yishni shu vaqtdan keyin bajarish kerak (-1 = yo'q). */
+    data class Decision(
+        val scheduleInNs: Long,
+        val predictedCenterX: Float,
+        val stackCenterX: Float,
+        val speedPxPerSec: Float
+    )
+
+    /** Kamera o'lchagan stack markazi (px); o'lchov bo'lmasa NaN. */
+    var stackCenterX = Float.NaN
+        private set
+    var speedPxPerSec = 0f
+        private set
+
+    /**
+     * Oxirgi kuzatuvda qo'yish nega rejalashtirilmadi (yoki `scheduled`).
+     * Matnlar doimiy — o'lchov yo'lida xotira ajratilmaydi.
+     */
+    var lastReason: String = REASON_IDLE
+        private set
+
+    private var prevX = Float.NaN
+    private var prevContentNs = 0L
+    private val sampleX = FloatArray(SAMPLES)
+    private val sampleNs = LongArray(SAMPLES)
+    private var sampleCount = 0
+    private var observations = 0
+    private var lastPlaceArrivalNs = Long.MIN_VALUE / 2
+    private var placedOnce = false
+
+    fun reset() {
+        lastReason = REASON_IDLE
+        stackCenterX = Float.NaN
+        speedPxPerSec = 0f
+        prevX = Float.NaN
+        prevContentNs = 0L
+        sampleCount = 0
+        observations = 0
+        lastPlaceArrivalNs = Long.MIN_VALUE / 2
+        placedOnce = false
+    }
+
+    /**
+     * Feeds one detector result; the caller places when [Decision.scheduleInNs] >= 0.
+     *
+     * [contentTimestampNs] is when the scene looked like this frame, i.e. the image
+     * timestamp corrected by the measured stream delay; [arrivalNs] is when the
+     * frame was processed and [nowNs] is the moment of the decision.
+     */
+    fun onObservation(
+        centerX: Float,
+        widthPx: Float,
+        stackLeft: Float,
+        stackRight: Float,
+        contentTimestampNs: Long,
+        arrivalNs: Long,
+        nowNs: Long,
+        screenWidthPx: Float
+    ): Decision {
+        if (stackRight - stackLeft > 1f) {
+            stackCenterX = (stackLeft + stackRight) * 0.5f
+        }
+        if (widthPx <= 1f) {
+            lastReason = REASON_NO_WIDTH
+            return Decision(-1L, centerX, stackCenterX, speedPxPerSec)
+        }
+        if (stackCenterX.isNaN()) {
+            lastReason = REASON_NO_STACK
+            return Decision(-1L, centerX, stackCenterX, speedPxPerSec)
+        }
+
+        updateSpeed(contentTimestampNs, centerX)
+        observations++
+
+        // The frame shows the block where it was at contentTimestampNs; the stream
+        // can be hundreds of ms old, so predict forward to the current moment.
+        val ageNs = (nowNs - contentTimestampNs).coerceIn(0L, maxPredictionNs)
+        // The block reflects off the playfield edges, and the captured frame can be
+        // hundreds of ms old, so the straight-line prediction is folded back into
+        // the playfield: this survives bounces that happened inside the delay.
+        val lo = screenWidthPx * PLAYFIELD_MARGIN + widthPx * 0.5f
+        val hi = screenWidthPx * (1f - PLAYFIELD_MARGIN) - widthPx * 0.5f
+        val raw = centerX + speedPxPerSec * (ageNs / 1_000_000_000f)
+        val folded = fold(raw, lo, hi)
+        val predicted = folded.first
+        val direction = folded.second * if (speedPxPerSec < 0f) -1f else 1f
+
+        // Right after a placement (and at session start) there is no usable speed
+        // yet: one frame of movement can be a bounce. Waiting for the full window
+        // costs a couple of frames but removes the first-cut mistakes.
+        if (sampleCount < SAMPLES) {
+            lastReason = REASON_SAMPLES
+            return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
+        }
+        // The very first placement waits for a whole sweep of samples: during the
+        // first frames the tracker is still settling, and a wrong first block would
+        // skew the stack that everything after it is measured against.
+        if (!placedOnce && observations < WARMUP_OBSERVATIONS) {
+            lastReason = REASON_FIRST_SWEEP
+            return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
+        }
+        if (placedOnce && arrivalNs - lastPlaceArrivalNs < cooldownNs) {
+            lastReason = REASON_COOLDOWN
+            return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
+        }
+        if (abs(speedPxPerSec) < minSpeedPxPerSec) {
+            lastReason = REASON_TOO_SLOW
+            return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
+        }
+
+        // Time until the block's centre reaches the measured stack centre.
+        val directionSpeed = direction * abs(speedPxPerSec)
+        if (directionSpeed == 0f) {
+            lastReason = REASON_TOO_SLOW
+            return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
+        }
+        val crossingNs = ((stackCenterX - predicted) / directionSpeed * 1_000_000_000f).toLong()
+        if (crossingNs !in 0L..maxScheduleNs) {
+            // Musbat: qo'yish joyi hali uzoq; manfiy: blok allaqachon o'tib ketgan.
+            lastReason = if (crossingNs < 0L) REASON_MISSED else REASON_FAR
+            return Decision(-1L, predicted, stackCenterX, speedPxPerSec)
+        }
+        lastReason = REASON_SCHEDULED
+        return Decision(crossingNs, predicted, stackCenterX, speedPxPerSec)
+    }
+
+    /**
+     * Velocity from the frame's own timestamps (the pipeline delivers frames in
+     * bursts, so arrival deltas would be noise). A 3-sample least-squares fit is
+     * used while it agrees with the newest pair; a bounce inside the window breaks
+     * that agreement and the newest pair wins.
+     */
+    private fun updateSpeed(contentTimestampNs: Long, centerX: Float) {
+        if (!prevX.isNaN()) {
+            val dt = (contentTimestampNs - prevContentNs) / 1_000_000_000f
+            when {
+                dt in 0.004f..0.25f -> speedPxPerSec = (centerX - prevX) / dt
+                dt > 0.25f -> speedPxPerSec = 0f
+            }
+        }
+        prevX = centerX
+        prevContentNs = contentTimestampNs
+
+        if (sampleCount < SAMPLES) {
+            sampleX[sampleCount] = centerX
+            sampleNs[sampleCount] = contentTimestampNs
+            sampleCount++
+        } else {
+            for (i in 0 until SAMPLES - 1) {
+                sampleX[i] = sampleX[i + 1]
+                sampleNs[i] = sampleNs[i + 1]
+            }
+            sampleX[SAMPLES - 1] = centerX
+            sampleNs[SAMPLES - 1] = contentTimestampNs
+        }
+
+        if (sampleCount < SAMPLES) return
+        val fit = fitVelocity()
+        if (fit == 0f) return
+        // Residual of the newest sample against the fit: a bounce shows up here.
+        val predictedNewest = sampleX[0] + fit * ((sampleNs[SAMPLES - 1] - sampleNs[0]) / 1_000_000_000f)
+        if (abs(predictedNewest - sampleX[SAMPLES - 1]) <= FIT_TOLERANCE_PX) {
+            speedPxPerSec = fit
+        }
+    }
+
+    private fun fitVelocity(): Float {
+        var meanT = 0.0
+        var meanX = 0.0
+        val count = sampleCount
+        for (i in 0 until count) {
+            meanT += sampleNs[i]
+            meanX += sampleX[i]
+        }
+        meanT /= count
+        meanX /= count
+        var num = 0.0
+        var den = 0.0
+        for (i in 0 until count) {
+            val dt = sampleNs[i] - meanT
+            num += dt * (sampleX[i] - meanX)
+            den += dt * dt
+        }
+        if (den <= 1.0) return 0f
+        return (num / den * 1_000_000_000.0).toFloat()
+    }
+
+    /**
+     * Folds [x] into [lo, hi] with reflection and returns the folded position and
+     * the direction (+1 / -1) the block is moving there.
+     */
+    private fun fold(x: Float, lo: Float, hi: Float): Pair<Float, Float> {
+        val span = hi - lo
+        if (span <= 1f) return Pair(x, 1f)
+        val period = 2f * span
+        var t = (x - lo) % period
+        if (t < 0f) t += period
+        return if (t <= span) Pair(lo + t, 1f) else Pair(hi - (t - span), -1f)
+    }
+
+    /** Called right after the block was actually placed. */
+    fun onPlaced(arrivalNs: Long) {
+        placedOnce = true
+        lastPlaceArrivalNs = arrivalNs
+        // The block respawns at the stack centre, so the previous velocity is stale.
+        prevX = Float.NaN
+        prevContentNs = 0L
+        sampleCount = 0
+        speedPxPerSec = 0f
+    }
+
+    companion object {
+        /** Nega tap yo'q — qisqa, doimiy matnlar (ekranda va CSV'da ko'rinadi). */
+        const val REASON_IDLE = "kutilyapti"
+        const val REASON_SCHEDULED = "scheduled"
+        const val REASON_NO_WIDTH = "blok_eni_yoq"
+        const val REASON_NO_STACK = "stack_yoq"
+        const val REASON_SAMPLES = "namuna_yetmayapti"
+        const val REASON_FIRST_SWEEP = "birinchi_supurish"
+        const val REASON_COOLDOWN = "cooldown"
+        const val REASON_TOO_SLOW = "sekin"
+        const val REASON_MISSED = "o_tib_ketdi"
+        const val REASON_FAR = "uzoq"
+
+        /** Lab playfield margin, the same 6% the game geometry uses. */
+        private const val PLAYFIELD_MARGIN = 0.06f
+        private const val SAMPLES = 3
+        /** Observations the tracker wants before its first placement. */
+        const val WARMUP_OBSERVATIONS = 10
+        const val FIT_TOLERANCE_PX = 12f
+    }
+}

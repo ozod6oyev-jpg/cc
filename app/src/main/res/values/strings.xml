@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PerfectTap</string>
+    <string name="title_with_stage">PerfectTap — %1$s-bosqich · v%2$s</string>
+    <string name="subtitle">Root, tap, ekran oqimi, detektor va kechikish laboratoriyasi</string>
+
+    <string name="root_status_unknown">Root: tekshirilmoqda…</string>
+    <string name="root_granted">Root: berilgan (uid=0)</string>
+    <string name="root_denied">Root: berilmagan</string>
+    <string name="device_status_unknown">Qurilma: aniqlanmagan</string>
+    <string name="device_not_found">Qurilma: topilmadi</string>
+    <string name="device_found">Qurilma: %1$s → %2$s</string>
+    <string name="device_shizuku">Qurilma: Shizuku (evdev kerak emas)</string>
+    <string name="axis_range">ABS X %1$d..%2$d · Y %3$d..%4$d</string>
+    <string name="btn_check">Holatni qayta tekshirish</string>
+    <string name="shizuku_unknown">Shizuku: tekshirilmoqda…</string>
+    <string name="shizuku_not_running">Shizuku: ishlamayapti (ilova o‘rnatilmagan yoki xizmat to‘xtagan)</string>
+    <string name="shizuku_denied">Shizuku: ruxsat berilmagan</string>
+    <string name="shizuku_granted">Shizuku: ruxsat berilgan (v%1$s) — tap rootsiz ishlaydi</string>
+    <string name="btn_shizuku_permission">Shizuku ruxsati</string>
+    <string name="shizuku_no_service">✗ Shizuku ishlamayapti — Shizuku ilovasini o‘rnatib, xizmatni ishga tushiring</string>
+    <string name="shizuku_request_failed">Shizuku ruxsat so‘rovi yuborilmadi (eski versiya) — Shizuku ichida qo‘lda ruxsat bering</string>
+    <string name="lab_input_no_service">Δ_input: root ham, Shizuku ham tayyor emas</string>
+    <string name="btn_tap_center">Markazga bosish (3 s hisob)</string>
+    <string name="btn_tap_five">5 marta bosish (1 s oraliq)</string>
+
+    <string name="capture_stopped">Ekran oqimi: to‘xtatilgan</string>
+    <string name="capture_running">Ekran oqimi: ishlayapti</string>
+    <string name="btn_capture_start">Ekran oqimini boshlash</string>
+    <string name="btn_capture_stop">Ekran oqimini to‘xtatish</string>
+    <string name="capture_stats_placeholder">—</string>
+    <string name="stats_stream">%1$d×%2$d · %3$.1f kadr/s · %4$d kadr</string>
+    <string name="stats_frame">kadr: o‘rt. %1$.1f ms · maks %2$.1f ms</string>
+    <string name="stats_latency">tebranish %1$.2f ms · kechikish %2$.1f ms</string>
+    <string name="stats_detector">detektor: chap %1$.1f · eni %2$.1f · markaz %3$.1f</string>
+    <string name="stats_detector_none">detektor: blok yo‘q · qirralar %1$d</string>
+    <string name="stats_detect_time">aniqlash %1$.2f ms · qirralar %2$d · Y %3$d</string>
+    <string name="stats_calibration">kalibrlash: %1$d/%2$d kadr · eni og‘ishi p95 %3$.2f px</string>
+    <string name="stats_memory">xotira o‘zgarishi: %1$d KB/s</string>
+
+    <string name="capture_notif_channel">Ekran oqimi</string>
+    <string name="capture_notif_title">Ekran oqimi faol</string>
+    <string name="capture_notif_text">PerfectTap ekranni tahlil qilmoqda</string>
+    <string name="action_stop">To‘xtatish</string>
+
+    <string name="btn_lab">Laboratoriya (kechikish o‘lchovi)</string>
+    <string name="lab_title">Laboratoriya — avtomatik 1x1 (Δ o‘lchovi)</string>
+    <string name="lab_status_idle">Tayyor. Boshlanganda bloklar avtomatik qo‘yiladi.</string>
+    <string name="lab_status_running">O‘lchov ketmoqda — blok kamera bo‘yicha avtomatik qo‘yiladi</string>
+    <string name="lab_status_warmup">Isinish (3 s): kuzatilmoqda, tap yuborilmaydi</string>
+    <string name="lab_status_no_consent">Ekran oqimi ruxsati berilmadi</string>
+    <string name="lab_start">Boshlash</string>
+    <string name="lab_stop">To‘xtatish</string>
+    <string name="lab_measure_input">Δ_input (root/Shizuku)</string>
+    <string name="lab_stream_empty">Δ_stream: ma’lumot yo‘q</string>
+    <string name="lab_stream_format">Δ_stream: %1$d ta · o‘rt. %2$.2f ms · p95 %3$.2f ms · jitter %4$.2f ms</string>
+    <string name="lab_input_empty">Δ_input: o‘lchanmagan (root yoki Shizuku kerak)</string>
+    <string name="lab_input_format">Δ_input: %1$d/%2$d ta · o‘rt. %3$d µs · p95 %4$d µs · jitter %5$d µs</string>
+    <string name="lab_input_running">Δ_input o‘lchanmoqda (avto to‘xtatildi, 120 tap)…</string>
+    <string name="lab_input_no_root">Δ_input: root ham, Shizuku ham berilmagan</string>
+    <string name="lab_input_no_device">Δ_input: sensorli ekran topilmadi</string>
+    <string name="lab_input_no_channel">Δ_input: bosish kanali ochilmadi</string>
+    <string name="lab_criterion_placeholder">Mezon (jitter ≤ 1 kadr): kutilyapti</string>
+    <string name="lab_criterion_waiting">Mezon (jitter ≤ 1 kadr ≈ %1$.1f ms): kutilyapti</string>
+    <string name="lab_criterion_pass">Mezon (jitter ≤ 1 kadr ≈ %1$.1f ms): o‘tdi ✓</string>
+    <string name="lab_criterion_fail">Mezon (jitter ≤ 1 kadr ≈ %1$.1f ms): o‘tmadi ✗</string>
+    <string name="lab_game_empty">blok: 0 · perfect: 0 · kamera: 0</string>
+    <string name="lab_game_line">blok: %1$d · perfect: %2$d · kesish: %3$d · kamera: %4$d · tap: %5$d · tezlik: %6$.0f px/s · sabab: %7$s</string>
+    <string name="lab_speed_format">tezlik: %1$.0f px/s</string>
+    <string name="lab_accel_format">blok o‘sishi: +%1$.0f%%</string>
+    <string name="lab_track_empty">Y_scan: —</string>
+    <string name="lab_track_line">Y_scan: %1$d px · tasma: %2$d px · kamera yorug‘ligi: %3$.0f / %4$.0f</string>
+    <string name="lab_missed_empty">mos kelmagan kadr: 0</string>
+    <string name="lab_missed_format">mos kelmagan kadr: %1$d</string>
+    <string name="lab_csv_empty">Sessiya yozuvi ochilmadi</string>
+    <string name="lab_session_recording">Yozilmoqda: %1$d qator → %2$s</string>
+    <string name="lab_session_finished">Sessiya yozildi: %1$d qator — «Sessiyani saqlash» bilan nusxalang</string>
+    <string name="lab_session_saved">Saqlandi: %1$s · %2$d qator</string>
+    <string name="lab_session_save_failed">Saqlanmadi: %1$s</string>
+    <string name="lab_session_empty">Sessiya fayli hali yo‘q</string>
+    <string name="btn_save_session">Sessiyani saqlash (nom va joy)</string>
+
+    <string name="log_title">Log</string>
+    <string name="log_placeholder">Log shu yerda ko‘rinadi.</string>
+</resources>

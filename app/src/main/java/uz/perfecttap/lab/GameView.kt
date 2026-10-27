@@ -220,7 +220,7 @@ class GameView @JvmOverloads constructor(
         frameStartX = sim.movingX
         frameStartDir = sim.direction
         advanceTo(sim, frameTimeNanos)
-        ring.record(frameTimeNanos, sim.movingCenterX)
+        ring.record(frameTimeNanos, sim.movingCenterX, sim.direction.toInt())
         invalidate()
         choreographer.postFrameCallback(frameCallback)
     }

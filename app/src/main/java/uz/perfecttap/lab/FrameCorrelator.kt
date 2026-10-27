@@ -20,6 +20,11 @@ class FrameCorrelator(
         const val DEFAULT_MAX_LATENCY_NS = 500_000_000L
         /** Frames whose measured delay the prediction window looks back over. */
         private const val WINDOW = 5
+        /** Kutilgan kechikish shuncha o'lchovdan keyin tanlovga ta'sir qiladi. */
+        private const val MIN_FOR_HINT = 3
+        /** Yo'nalish faqat yaqin kadrlar orasida va aniq siljishda ishonchli. */
+        private const val DIRECTION_MAX_GAP_NS = 50_000_000L
+        private const val DIRECTION_MIN_PX = 1f
     }
 
     var lastVsyncNs = 0L
@@ -45,6 +50,10 @@ class FrameCorrelator(
     var lastMiss = "none"
         private set
 
+    /** Oldingi kuzatuv: kadrdagi harakat yo'nalishini aniqlash uchun. */
+    private var prevCenterX = Float.NaN
+    private var prevImageNs = 0L
+
     private val recent = LongArray(WINDOW)
     private val sorted = LongArray(WINDOW)
     private var recentCount = 0
@@ -52,11 +61,22 @@ class FrameCorrelator(
 
     /** Δ_stream in nanoseconds, or -1 when this frame cannot be matched. */
     fun streamDeltaNs(centerX: Float, imageTimestampNs: Long): Long {
+        // Chetdan qaytayotgan blok bir xil X dan ikki marta o'tadi: yo'nalish va
+        // kutilgan kechikish bo'lmasa, kadr oldingi supurishga bog'lanib, Δ_stream
+        // ~100+ ms ga sakrardi va bashorat (hamda qo'yish) buzilardi.
+        val direction = observedDirection(centerX, imageTimestampNs)
+        val expectedVsyncNs = if (recentCount >= MIN_FOR_HINT && stableDeltaNs > 0L) {
+            imageTimestampNs - stableDeltaNs
+        } else {
+            0L
+        }
         val slot = ring.matchCenter(
             centerX = centerX,
             tolerancePx = tolerancePx,
             notOlderThanNs = imageTimestampNs - maxLatencyNs,
-            maxFrames = maxAgeFrames
+            maxFrames = maxAgeFrames,
+            direction = direction,
+            expectedVsyncNs = expectedVsyncNs
         )
         if (slot < 0) {
             lastMiss = "no_draw_match"
@@ -79,7 +99,27 @@ class FrameCorrelator(
         return delta
     }
 
+    /** Kadrdagi harakat yo'nalishi: oldingi kuzatuvga nisbatan (+1 / -1 / 0). */
+    private fun observedDirection(centerX: Float, imageTimestampNs: Long): Int {
+        val prevX = prevCenterX
+        val prevNs = prevImageNs
+        prevCenterX = centerX
+        prevImageNs = imageTimestampNs
+        if (prevX.isNaN()) return 0
+        val dt = imageTimestampNs - prevNs
+        if (dt <= 0L || dt > DIRECTION_MAX_GAP_NS) return 0
+        val dx = centerX - prevX
+        return when {
+            dx >= DIRECTION_MIN_PX -> 1
+            dx <= -DIRECTION_MIN_PX -> -1
+            else -> 0
+        }
+    }
+
     fun reset() {
+        prevCenterX = Float.NaN
+        prevImageNs = 0L
+        lastMiss = "none"
         lastVsyncNs = 0L
         lastSlot = -1
         recentCount = 0

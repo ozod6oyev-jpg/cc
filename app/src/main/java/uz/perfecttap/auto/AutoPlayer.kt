@@ -8,14 +8,18 @@ import kotlin.math.roundToLong
  * Haqiqiy o'yin uchun avto-kliker «miyasi». Android API yo'q — JVM testlarda
  * tekshiriladi; xizmat ([OverlayService]) faqat kadr va vaqtni beradi.
  *
- * Holatlar:
+ * Holatlar (tartib bilan):
  *  · [State.SCANNING] — o'yin maydonini kutadi: bitta qo'zg'almas blok (stack)
- *    va uning ustida borib-kelayotgan, eni stack bilan bir xil blok;
- *  · [State.READY]    — maydon topildi, «Boshlash» faol;
- *  · [State.WARMUP]   — qizib olish: tezlik o'rganiladi, tap yuborilmaydi;
+ *    va uning ustida borib-kelayotgan, eni stack bilan bir xil blok. Topilishi
+ *    bilan skanerlash tugaydi;
+ *  · [State.WARMUP]   — qizib olish (tanlangan bo'lsa): tezlik o'rganiladi,
+ *    tap yuborilmaydi, «Boshlash» hali faol emas;
+ *  · [State.READY]    — maydon topildi va qizildi: faqat shunda «Boshlash» faol;
  *  · [State.RUNNING]  — har qo'yishdan keyin [Config.settleNs] (1 s) kutadi,
- *    keyin blok perfect zonaga kelgan paytga tap rejalashtiradi;
- *  · [State.LOST]     — blok/stack uzoq ko'rinmadi (o'yin tugagan bo'lishi mumkin).
+ *    keyin blok perfect zonaga kelgan paytga tap rejalashtiradi.
+ *
+ * Maydon [Config.lostTimeoutNs] ko'rinmasa (o'yin tugadi, menyu ochildi),
+ * qayta skanerlashga o'tiladi ([lostNotice]) — «Boshlash» yana o'chadi.
  *
  * Har bir blok avvalgisidan biroz tezroq yuradi: tezlik har qo'yishdan keyin
  * qaytadan o'lchanadi ([AutoPlacer.onPlaced]).
@@ -52,7 +56,7 @@ class AutoPlayer(private val config: Config = Config()) {
         val scanStackJitterPx: Float = 4f,
         /** Harakatlanuvchi blok va stack enlari farqi (nisbat). */
         val widthMatchTolerance: Float = 0.15f,
-        /** Blok yoki stack shuncha vaqt ko'rinmasa — [State.LOST]. */
+        /** Blok yoki stack shuncha vaqt ko'rinmasa — qayta skanerlash. */
         val lostTimeoutNs: Long = 4_000_000_000L,
         /** Natija (yangi stack eni) tapdan shuncha keyin o'lchanadi. */
         val resultDelayNs: Long = 600_000_000L,
@@ -75,7 +79,7 @@ class AutoPlayer(private val config: Config = Config()) {
         val bestFrameAfterNs: Long = 300_000_000L
     )
 
-    enum class State { IDLE, SCANNING, READY, WARMUP, RUNNING, LOST }
+    enum class State { IDLE, SCANNING, WARMUP, READY, RUNNING }
 
     /** Bitta qo'yish natijasi — kamera bo'yicha o'lchangan. */
     data class Result(
@@ -121,7 +125,12 @@ class AutoPlayer(private val config: Config = Config()) {
     private var bestFrameErrorPx = Float.MAX_VALUE
 
     private var warmupEndNs = 0L
+    private var warmupNs = 0L
     private var lastSeenNs = 0L
+
+    /** Maydon yo'qolgani uchun qayta skanerlanyapti (topilguncha true). */
+    var lostNotice = false
+        private set
 
     // Skanerlash oynasi.
     private val scanCenters = FloatArray(config.scanFrames)
@@ -149,33 +158,48 @@ class AutoPlayer(private val config: Config = Config()) {
     fun warmupLeftNs(nowNs: Long): Long =
         if (state == State.WARMUP) (warmupEndNs - nowNs).coerceAtLeast(0L) else 0L
 
-    fun scan() {
+    /**
+     * Skanerlashni boshlaydi; maydon topilgach [warmupNs] qizib olinadi
+     * (0 = darhol tayyor).
+     */
+    fun scan(warmupNs: Long) {
+        this.warmupNs = warmupNs.coerceAtLeast(0L)
         state = State.SCANNING
-        scanCount = 0
-        scanIndex = 0
+        lostNotice = false
+        resetScan()
+        placer.reset()
+        pendingResult = false
     }
 
-    /** «Boshlash»: faqat maydon topilgandan keyin. */
-    fun start(nowNs: Long, warmupNs: Long): Boolean {
-        if (state != State.READY && state != State.LOST) return false
-        placer.reset()
+    /** «Boshlash»: faqat maydon topilib, qizib olingandan keyin. */
+    fun start(nowNs: Long): Boolean {
+        if (state != State.READY) return false
         taps = 0
         perfectCount = 0
         imperfectCount = 0
         pendingResult = false
-        refStackLeft = Float.NaN
-        refStackWidth = Float.NaN
         result = null
         lastSeenNs = nowNs
-        warmupEndNs = nowNs + warmupNs.coerceAtLeast(0L)
-        state = if (warmupNs > 0L) State.WARMUP else State.RUNNING
+        state = State.RUNNING
         return true
     }
 
-    /** «To'xtatish»: maydon hali ko'rinib turibdi, qayta boshlash mumkin. */
+    /**
+     * «To'xtatish»: ishlash to'xtaydi, maydon kuzatilishda qoladi (qayta
+     * boshlash mumkin); skanerlash yoki qizib olish bekor qilinadi.
+     */
     fun stop() {
-        if (state == State.WARMUP || state == State.RUNNING || state == State.LOST) state = State.READY
+        state = when (state) {
+            State.RUNNING, State.READY -> State.READY
+            else -> State.IDLE
+        }
+        lostNotice = false
         pendingResult = false
+    }
+
+    private fun resetScan() {
+        scanCount = 0
+        scanIndex = 0
     }
 
     /** Oxirgi o'lchangan natija (bir marta qaytariladi). */
@@ -208,21 +232,25 @@ class AutoPlayer(private val config: Config = Config()) {
             abs(width - stackWidth) <= stackWidth * config.widthMatchTolerance
 
         when (state) {
-            State.IDLE, State.READY, State.LOST -> return -1L
+            State.IDLE -> return -1L
             State.SCANNING -> {
-                onScanFrame(seen, (left + right) * 0.5f, (stackLeft + stackRight) * 0.5f)
+                onScanFrame(seen, (left + right) * 0.5f, (stackLeft + stackRight) * 0.5f, nowNs)
                 return -1L
             }
-            State.WARMUP, State.RUNNING -> Unit
+            State.WARMUP, State.READY, State.RUNNING -> Unit
         }
 
         if (seen) lastSeenNs = nowNs
         if (nowNs - lastSeenNs > config.lostTimeoutNs) {
-            state = State.LOST
+            // O'yin tugadi yoki maydon yopildi: qaytadan qidiramiz.
+            state = State.SCANNING
+            lostNotice = true
+            resetScan()
+            placer.reset()
             pendingResult = false
             return -1L
         }
-        if (state == State.WARMUP && nowNs >= warmupEndNs) state = State.RUNNING
+        if (state == State.WARMUP && nowNs >= warmupEndNs) state = State.READY
 
         if (pendingResult && nowNs - pendingTapNs >= config.resultDelayNs && hasStack && stackWidth > 1f) {
             measureResult(stackLeft, stackWidth)
@@ -302,10 +330,9 @@ class AutoPlayer(private val config: Config = Config()) {
         const val REASON_THROUGH_BOUNCE = "qaytish_ichida"
     }
 
-    private fun onScanFrame(seen: Boolean, center: Float, stackCenter: Float) {
+    private fun onScanFrame(seen: Boolean, center: Float, stackCenter: Float, nowNs: Long) {
         if (!seen) {
-            scanCount = 0
-            scanIndex = 0
+            resetScan()
             return
         }
         scanCenters[scanIndex] = center
@@ -325,7 +352,11 @@ class AutoPlayer(private val config: Config = Config()) {
             maxS = maxOf(maxS, scanStacks[i])
         }
         if (maxC - minC >= config.scanMinTravelPx && maxS - minS <= config.scanStackJitterPx) {
-            state = State.READY
+            // Maydon topildi — skanerlash tugaydi; qizib olish shu yerdan boshlanadi.
+            lostNotice = false
+            lastSeenNs = nowNs
+            warmupEndNs = nowNs + warmupNs
+            state = if (warmupNs > 0L) State.WARMUP else State.READY
         }
     }
 

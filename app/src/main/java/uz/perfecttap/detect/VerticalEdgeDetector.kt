@@ -18,7 +18,12 @@ class VerticalEdgeDetector(
     private val rowStep: Int,
     private val rows: Int,
     private val minBlockHeightPx: Int = 30,
-    private val maxBlockHeightPx: Int = 400
+    private val maxBlockHeightPx: Int = 400,
+    /**
+     * Haqiqiy o'yin (qora fon, bloklar orasida tirqish): harakatlanuvchi blok —
+     * **tagida o'xshash blok turgan eng yuqori blok** ([detectBlockOnStack]).
+     */
+    private val requireBlockBelow: Boolean = false
 ) {
 
     /** Row positions are in strip rows; multiply by [rowStep] for pixels. */
@@ -35,6 +40,8 @@ class VerticalEdgeDetector(
     private val smooth = FloatArray(rows)
     private val peakRow = FloatArray(rows)
     private val peakStrength = FloatArray(rows)
+    private val blockTop = FloatArray(rows)
+    private val blockBottom = FloatArray(rows)
 
     var lastPeaks = 0
         private set
@@ -66,6 +73,10 @@ class VerticalEdgeDetector(
         }
         lastMeanLum = lumSum / rows
         lastMaxLum = lumMax
+        if (requireBlockBelow) {
+            lastPeaks = 0
+            return detectBlockOnStack()
+        }
 
         grad[0] = 0f
         grad[rows - 1] = 0f
@@ -126,5 +137,57 @@ class VerticalEdgeDetector(
             }
         }
         return null
+    }
+
+    /**
+     * Haqiqiy o'yinda fon qora va bloklar orasida bir necha piksellik qora
+     * tirqish bor. Gradient cho'qqilari bu yerda yaramaydi: to'q blokning pastki
+     * qirrasi (55 → 0) keyingi kumush blokning kuchli qirrasi (0 → 246) ichida
+     * yutilib ketadi. Shuning uchun tasma **yorqinlik bo'laklariga** ajratiladi:
+     * fondan yorug' qatorlar ketma-ketligi — bitta blok (yoki yozuv).
+     */
+    private fun detectBlockOnStack(): Result? {
+        var blocks = 0
+        var runStart = -1
+        for (r in 0..rows) {
+            val bright = r < rows && avg[r] >= BACKGROUND_LUMINANCE
+            if (bright && runStart < 0) {
+                runStart = r
+            } else if (!bright && runStart >= 0) {
+                val heightPx = (r - runStart) * rowStep
+                if (heightPx in minBlockHeightPx..maxBlockHeightPx) {
+                    blockTop[blocks] = runStart.toFloat()
+                    blockBottom[blocks] = r.toFloat()
+                    blocks++
+                }
+                runStart = -1
+            }
+        }
+        // Tagida (kichik tirqish bilan) o'xshash balandlikdagi blok turgan eng
+        // yuqori blok — stack ustidagi harakatlanuvchi blok. «0» raqami va
+        // «PERFECT!»/«+2» yozuvlari ostidagi tirqish katta, shuning uchun o'tmaydi.
+        for (a in 0 until blocks) {
+            val heightPx = (blockBottom[a] - blockTop[a]) * rowStep
+            val maxGapRows = max(12f, 0.2f * heightPx) / rowStep
+            for (b in a + 1 until blocks) {
+                val gap = blockTop[b] - blockBottom[a]
+                if (gap > maxGapRows) break
+                val below = (blockBottom[b] - blockTop[b]) * rowStep
+                if (below < heightPx * 0.6f || below > heightPx * 1.6f) continue
+                return Result(
+                    topRow = blockTop[a],
+                    bottomRow = blockBottom[a],
+                    centerRow = (blockTop[a] + blockBottom[a]) * 0.5f,
+                    heightPx = heightPx,
+                    peaks = lastPeaks
+                )
+            }
+        }
+        return null
+    }
+
+    private companion object {
+        /** Bundan qorong'i qator — fon (qora osmon, yulduzlar tasmada yo'qoladi). */
+        const val BACKGROUND_LUMINANCE = 12f
     }
 }

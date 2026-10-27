@@ -79,6 +79,16 @@ object CaptureBus {
         labFrames.trySend(observation)
     }
 
+    /** Keyingi kadr shu faylga PNG bo'lib saqlansin (diagnostika). */
+    private val snapshotRequest = java.util.concurrent.atomic.AtomicReference<java.io.File?>(null)
+
+    fun requestSnapshot(file: java.io.File) {
+        snapshotRequest.set(file)
+    }
+
+    /** Kadr oqimidan chaqiriladi; so'rov bo'lsa uni oladi. */
+    fun takeSnapshotRequest(): java.io.File? = snapshotRequest.getAndSet(null)
+
     /** Rejim o'chganda eski kadrlar navbatda qolib ketmasin. */
     fun clearLabFrames() {
         while (labFrames.tryReceive().isSuccess) Unit

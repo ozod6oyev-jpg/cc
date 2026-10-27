@@ -34,6 +34,8 @@ import uz.perfecttap.inject.TouchDeviceFinder
 import uz.perfecttap.lab.LabActivity
 import uz.perfecttap.auto.OverlayService
 import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -79,7 +81,7 @@ class MainActivity : AppCompatActivity() {
     /** Sessiya faylini foydalanuvchi tanlagan joyga saqlash (SAF). */
     private var sessionToSave: File? = null
     private val saveSessionLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("text/csv")
+        ActivityResultContracts.CreateDocument("application/zip")
     ) { uri -> if (uri != null) exportSession(uri) }
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -314,7 +316,10 @@ class MainActivity : AppCompatActivity() {
         setBusy(false)
     }
 
-    /** Eng oxirgi sessiya (lab yoki avto) faylini saqlash. */
+    /**
+     * Eng oxirgi sessiya (lab yoki avto): CSV va shu sessiyaning diagnostika
+     * kadrlari (`<nom>-frame-N.png`) bitta ZIP bo'lib saqlanadi.
+     */
     private fun saveLastSession() {
         val newest = File(filesDir, "sessions").listFiles { f -> f.extension == "csv" }
             ?.maxByOrNull { it.lastModified() }
@@ -323,7 +328,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         sessionToSave = newest
-        saveSessionLauncher.launch(newest.name)
+        saveSessionLauncher.launch(newest.nameWithoutExtension + ".zip")
     }
 
     private fun exportSession(uri: Uri) {
@@ -331,8 +336,19 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
+                    val base = file.nameWithoutExtension
+                    val frames = file.parentFile
+                        ?.listFiles { f -> f.name.startsWith("$base-frame-") && f.extension == "png" }
+                        .orEmpty()
+                        .sortedBy { it.name }
                     val out = contentResolver.openOutputStream(uri) ?: error("fayl ochilmadi")
-                    out.use { stream -> file.inputStream().use { it.copyTo(stream) } }
+                    ZipOutputStream(out).use { zip ->
+                        for (entry in listOf(file) + frames) {
+                            zip.putNextEntry(ZipEntry(entry.name))
+                            entry.inputStream().use { it.copyTo(zip) }
+                            zip.closeEntry()
+                        }
+                    }
                 }
             }
             log(

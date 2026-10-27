@@ -84,7 +84,7 @@
     <string name="log_placeholder">Log shu yerda ko‘rinadi.</string>
     <!-- Avto-kliker (qalqib chiquvchi panel) -->
     <string name="btn_auto_panel">Avto-kliker panelini ochish</string>
-    <string name="btn_save_last_session">Oxirgi sessiyani saqlash (CSV)</string>
+    <string name="btn_save_last_session">Oxirgi sessiyani saqlash (ZIP: CSV + kadrlar)</string>
     <string name="overlay_title">PerfectTap · avto</string>
     <string name="overlay_close">Yopish</string>
     <string name="overlay_scan">Skanerlash</string>
@@ -92,12 +92,12 @@
     <string name="overlay_stop">To‘xtatish</string>
     <string name="overlay_warmup_format">Qizib olish: %1$d s</string>
     <string name="overlay_warmup_off">Qizib olish: yo‘q</string>
-    <string name="overlay_state_idle">«Skanerlash»ni bosing va o‘yinni oching</string>
+    <string name="overlay_state_idle">O‘yinni oching va «Skanerlash»ni bosing (qizib olish oldindan tanlanadi)</string>
     <string name="overlay_state_scanning">Skanerlanmoqda… stack va borib-kelayotgan blok kutilmoqda</string>
     <string name="overlay_state_ready">✓ O‘yin maydoni topildi — «Boshlash»</string>
-    <string name="overlay_state_warmup">Qizib olish: %1$.1f s</string>
+    <string name="overlay_state_warmup">✓ Maydon topildi · qizib olinmoqda: %1$.1f s</string>
     <string name="overlay_state_running">Ishlamoqda · %1$s</string>
-    <string name="overlay_state_lost">O‘yin maydoni yo‘qoldi (o‘yin tugadimi?) — qayta «Boshlash»</string>
+    <string name="overlay_state_lost">O‘yin maydoni yo‘qoldi (o‘yin tugadimi?) — qayta skanerlanmoqda…</string>
     <string name="overlay_no_capture">Ekran oqimi ishlamayapti — ilovadan panelni qayta oching</string>
     <string name="overlay_no_channel">Bosish kanali yo‘q: root yoki Shizuku kerak</string>
     <string name="overlay_opening_channel">Bosish kanali ochilmoqda…</string>

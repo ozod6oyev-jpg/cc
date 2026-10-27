@@ -65,6 +65,9 @@ class OverlayService : Service() {
         private const val PREFS = "auto_calibration"
         private const val KEY_LEAD = "lead_ns"
         private const val KEY_BIAS = "bias_ns"
+        /** Diagnostika: skanerlash paytidagi kadrlar (PNG). */
+        private const val MAX_SNAPSHOTS = 5
+        private const val SNAPSHOT_EVERY_NS = 3_000_000_000L
 
         fun startIntent(context: Context): Intent = Intent(context, OverlayService::class.java)
 
@@ -87,6 +90,11 @@ class OverlayService : Service() {
     @Volatile
     private var recorder: LabSessionRecorder? = null
     private var warmupIndex = 0
+    /** Joriy sessiya fayllari nomining boshi (`auto-<vaqt>`). */
+    @Volatile
+    private var recorderBase: String? = null
+    private var snapshotsTaken = 0
+    private var lastSnapshotNs = 0L
     private var screenWidth = 0
     private var screenHeight = 0
     private var message: String? = null
@@ -159,8 +167,11 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            // FLAG_SECURE: ekran oqimida panel qora ko'rinadi (o'yin foni kabi),
+            // shuning uchun uning tugmalari «blok» deb aniqlanmaydi.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -205,6 +216,11 @@ class OverlayService : Service() {
         render()
     }
 
+    /**
+     * Skanerlash: maydon topilguncha kutadi, so'ng (tanlangan bo'lsa) qizib
+     * oladi; «Boshlash» faqat shundan keyin faollashadi. Sessiya yozuvi va
+     * diagnostika kadrlari shu yerdan boshlanadi.
+     */
     private fun onScan() {
         if (!CaptureBus.running.value) {
             message = getString(R.string.overlay_no_capture)
@@ -214,28 +230,43 @@ class OverlayService : Service() {
         message = null
         // Butun ekran tahlil qilinadi (lab paneli yo'q).
         startService(CaptureService.labIntent(this, true, 0))
+        val warmupS = WARMUP_CHOICES_S[warmupIndex]
+        startRecorder(warmupS)
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         scope.launch(engineDispatcher) {
             scheduler?.cancel()
-            engine.scan()
+            if (prefs.contains(KEY_LEAD)) {
+                engine.restoreCalibration(prefs.getLong(KEY_LEAD, 0L), prefs.getLong(KEY_BIAS, 0L))
+            }
+            engine.scan(warmupS * 1_000_000_000L)
+            snapshotsTaken = 0
+            lastSnapshotNs = 0L
+            recorder?.event(
+                "auto",
+                "scan warmup_s=$warmupS lead_ms=${engine.leadNs / 1e6} bias_ms=${engine.timeBiasNs / 1e6}"
+            )
         }
+        // Bosish kanali skanerlash/qizish paytida tayyorlanadi: «Boshlash» kutmaydi.
+        scope.launch { ensureTapChannel() }
         render()
+    }
+
+    private suspend fun ensureTapChannel(): Boolean {
+        if (channel != null) return true
+        message = getString(R.string.overlay_opening_channel)
+        render()
+        val opened = withContext(Dispatchers.IO) {
+            runCatching { TapChannels.open(this@OverlayService) }.getOrNull()
+        }
+        channel = opened?.channel
+        message = if (channel == null) getString(R.string.overlay_no_channel) else null
+        render()
+        return channel != null
     }
 
     private fun onStart() {
         scope.launch {
-            if (channel == null) {
-                message = getString(R.string.overlay_opening_channel)
-                render()
-                val opened = withContext(Dispatchers.IO) {
-                    runCatching { TapChannels.open(this@OverlayService) }.getOrNull()
-                }
-                channel = opened?.channel
-                if (channel == null) {
-                    message = getString(R.string.overlay_no_channel)
-                    render()
-                    return@launch
-                }
-            }
+            if (!ensureTapChannel()) return@launch
             if (scheduler == null) {
                 scheduler = TapScheduler(
                     onFire = ::fireTap,
@@ -244,21 +275,11 @@ class OverlayService : Service() {
                     }
                 )
             }
-            message = null
-            val warmupS = WARMUP_CHOICES_S[warmupIndex]
-            startRecorder(warmupS)
-            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-            withContext(engineDispatcher) {
+            val started = withContext(engineDispatcher) {
                 scheduler?.rearm()
-                if (prefs.contains(KEY_LEAD)) {
-                    engine.restoreCalibration(prefs.getLong(KEY_LEAD, 0L), prefs.getLong(KEY_BIAS, 0L))
-                }
-                engine.start(System.nanoTime(), warmupS * 1_000_000_000L)
+                engine.start(System.nanoTime())
             }
-            recorder?.event(
-                "auto",
-                "start warmup_s=$warmupS lead_ms=${engine.leadNs / 1e6} bias_ms=${engine.timeBiasNs / 1e6}"
-            )
+            if (started) recorder?.event("auto", "start")
             render()
         }
     }
@@ -269,7 +290,7 @@ class OverlayService : Service() {
                 scheduler?.cancel()
                 engine.stop()
             }
-            closeRecorder("user stop")
+            recorder?.event("auto", "stop")
             render()
         }
     }
@@ -308,8 +329,11 @@ class OverlayService : Service() {
         if (fireAt >= 0L) scheduler?.plan(fireAt)
         if (engine.state != before) {
             recorder?.event("auto", "state ${before.name} -> ${engine.state.name}")
-            if (engine.state == AutoPlayer.State.LOST) scheduler?.cancel()
+            if (engine.state == AutoPlayer.State.SCANNING) scheduler?.cancel()
+            // Maydon topilgan kadr ham saqlanadi: aniqlash nimani ko'rgani ma'lum bo'lsin.
+            if (before == AutoPlayer.State.SCANNING) requestSnapshot(nowNs, force = true)
         }
+        if (engine.state == AutoPlayer.State.SCANNING) requestSnapshot(nowNs, force = false)
         engine.consumeResult()?.let { result ->
             if (result.trusted) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
@@ -359,6 +383,17 @@ class OverlayService : Service() {
         )
     }
 
+    /** Skanerlash paytida har [SNAPSHOT_EVERY_NS] da bitta kadr (ko'pi bilan [MAX_SNAPSHOTS]). */
+    private fun requestSnapshot(nowNs: Long, force: Boolean) {
+        val base = recorderBase ?: return
+        if (snapshotsTaken >= MAX_SNAPSHOTS) return
+        if (!force && lastSnapshotNs != 0L && nowNs - lastSnapshotNs < SNAPSHOT_EVERY_NS) return
+        lastSnapshotNs = nowNs
+        snapshotsTaken++
+        CaptureBus.requestSnapshot(File(File(filesDir, "sessions"), "$base-frame-$snapshotsTaken.png"))
+        recorder?.event("auto", "snapshot $base-frame-$snapshotsTaken.png")
+    }
+
     private fun render() {
         val b = binding ?: return
         scope.launch {
@@ -372,7 +407,8 @@ class OverlayService : Service() {
                     perfect = engine.perfectCount,
                     imperfect = engine.imperfectCount,
                     speed = engine.speedPxPerSec,
-                    leadNs = engine.leadNs
+                    leadNs = engine.leadNs,
+                    lostNotice = engine.lostNotice
                 )
             }
             val capture = CaptureBus.running.value
@@ -380,12 +416,13 @@ class OverlayService : Service() {
                 !capture -> getString(R.string.overlay_no_capture)
                 else -> when (snapshot.state) {
                     AutoPlayer.State.IDLE -> getString(R.string.overlay_state_idle)
-                    AutoPlayer.State.SCANNING -> getString(R.string.overlay_state_scanning)
+                    AutoPlayer.State.SCANNING -> getString(
+                        if (snapshot.lostNotice) R.string.overlay_state_lost else R.string.overlay_state_scanning
+                    )
                     AutoPlayer.State.READY -> getString(R.string.overlay_state_ready)
                     AutoPlayer.State.WARMUP ->
                         getString(R.string.overlay_state_warmup, snapshot.warmupLeftNs / 1e9)
                     AutoPlayer.State.RUNNING -> getString(R.string.overlay_state_running, snapshot.reason)
-                    AutoPlayer.State.LOST -> getString(R.string.overlay_state_lost)
                 }
             }
             b.overlayCounters.text = getString(
@@ -396,13 +433,15 @@ class OverlayService : Service() {
                 kotlin.math.abs(snapshot.speed),
                 snapshot.leadNs / 1e6
             )
-            val active = snapshot.state == AutoPlayer.State.WARMUP ||
-                snapshot.state == AutoPlayer.State.RUNNING
-            b.btnScan.isEnabled = capture && !active
-            b.btnStart.isEnabled = capture &&
-                (snapshot.state == AutoPlayer.State.READY || snapshot.state == AutoPlayer.State.LOST)
-            b.btnStop.isEnabled = active
-            b.btnWarmup.isEnabled = !active
+            val state = snapshot.state
+            val busy = state == AutoPlayer.State.SCANNING ||
+                state == AutoPlayer.State.WARMUP ||
+                state == AutoPlayer.State.RUNNING
+            // Skanerlash tugaydi va qizib olinmaguncha «Boshlash» o'chiq.
+            b.btnScan.isEnabled = capture && !busy
+            b.btnStart.isEnabled = capture && state == AutoPlayer.State.READY
+            b.btnStop.isEnabled = busy
+            b.btnWarmup.isEnabled = !busy
             val warmupS = WARMUP_CHOICES_S[warmupIndex]
             b.btnWarmup.text = if (warmupS > 0) {
                 getString(R.string.overlay_warmup_format, warmupS)
@@ -420,7 +459,8 @@ class OverlayService : Service() {
         val perfect: Int,
         val imperfect: Int,
         val speed: Float,
-        val leadNs: Long
+        val leadNs: Long,
+        val lostNotice: Boolean
     )
 
     private fun startVsyncClock() {
@@ -442,6 +482,7 @@ class OverlayService : Service() {
         runCatching {
             val dir = File(filesDir, "sessions").apply { mkdirs() }
             val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+            recorderBase = "auto-$stamp"
             recorder = LabSessionRecorder(
                 File(dir, "auto-$stamp.csv"),
                 listOf(

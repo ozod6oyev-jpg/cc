@@ -323,6 +323,9 @@ class CaptureService : Service() {
             // buffers then become inaccessible and must not be read.
             if (!active) return
             val plane = image.planes.firstOrNull() ?: return
+            CaptureBus.takeSnapshotRequest()?.let { file ->
+                saveSnapshot(plane, image.width, image.height, file)
+            }
             val slice = scanline ?: return
             // 1) Y tracking: locate the moving block in a vertical strip placed at
             // the block's last measured X, so the strip stays on the moving block.
@@ -489,6 +492,41 @@ class CaptureService : Service() {
     }
 
     /**
+     * Diagnostika: butun kadrni PNG qilib saqlaydi (skanerlash paytida, kam-kam).
+     * Piksellar shu oqimda nusxalanadi (bufer kadrdan keyin yopiladi),
+     * siqish esa alohida oqimda.
+     */
+    private fun saveSnapshot(plane: android.media.Image.Plane, width: Int, height: Int, file: java.io.File) {
+        val buffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val limit = buffer.limit()
+        val argb = IntArray(width * height)
+        for (y in 0 until height) {
+            val base = y * rowStride
+            for (x in 0 until width) {
+                val offset = base + x * pixelStride
+                if (offset + 4 > limit) break
+                val p = buffer.getInt(offset)
+                // RGBA bayt tartibi (little endian int: AABBGGRR) -> ARGB.
+                argb[y * width + x] = (p and 0xFF00FF00.toInt()) or
+                    ((p and 0xFF) shl 16) or ((p ushr 16) and 0xFF)
+            }
+        }
+        Thread({
+            runCatching {
+                val bitmap = android.graphics.Bitmap.createBitmap(
+                    argb, width, height, android.graphics.Bitmap.Config.ARGB_8888
+                )
+                file.outputStream().use {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                }
+                bitmap.recycle()
+            }.onFailure { Log.w(TAG, "snapshot failed", it) }
+        }, "pt-snapshot").start()
+    }
+
+    /**
      * Y-tracking tasmasini ROI bilan quradi. Lab rejimi yoqilganda ROI
      * o'zgargan bo'lsa, tasma shu chegara bilan qayta quriladi.
      */
@@ -501,7 +539,13 @@ class CaptureService : Service() {
         val endY = maxOf(startY + rowStep * 4, bandLimitY() + BAND_HEIGHT / 2)
         val strip = VerticalStripReader(stripWidth, rowStep, startY, endY)
         stripReader = strip
-        verticalDetector = VerticalEdgeDetector(stripWidth, rowStep, strip.rows)
+        // ROI = 0 — avto-kliker butun ekranda, haqiqiy o'yin ustida ishlaydi.
+        verticalDetector = VerticalEdgeDetector(
+            stripWidth,
+            rowStep,
+            strip.rows,
+            requireBlockBelow = roiBottomY == 0
+        )
     }
 
     /**

@@ -1,6 +1,7 @@
 package uz.perfecttap.auto
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uz.perfecttap.lab.GameSim
@@ -97,7 +98,7 @@ class AutoPlayerTest {
     @Test
     fun scanFindsAStaticStackAndAMovingBlock() {
         val player = AutoPlayer()
-        player.scan()
+        player.scan(0L)
         var t = 0L
         var x = 300f
         repeat(60) {
@@ -111,7 +112,7 @@ class AutoPlayerTest {
     @Test
     fun scanIgnoresTwoStaticBlocks() {
         val player = AutoPlayer()
-        player.scan()
+        player.scan(0L)
         var t = 0L
         repeat(120) {
             t += 8 * ms
@@ -120,26 +121,39 @@ class AutoPlayerTest {
         assertEquals(AutoPlayer.State.SCANNING, player.state)
     }
 
+    /** Skanerlash maydon topilishi bilan tugaydi, qizib olish o'tmaguncha «Boshlash» yo'q. */
     @Test
-    fun warmupHoldsTapsAndThenRuns() {
+    fun scanEndsOnTheFieldThenWarmsUpBeforeStartIsAllowed() {
         val loop = Loop(inputLatencyMs = 8.0)
-        loop.player.scan()
+        loop.player.scan(5_000 * ms)
         loop.run(1.0)
-        assertEquals(AutoPlayer.State.READY, loop.player.state)
-        assertTrue(loop.player.start(loop.nowNs, 5_000 * ms))
-        loop.run(4.5)
         assertEquals(AutoPlayer.State.WARMUP, loop.player.state)
+        assertFalse("qizib olinmaguncha boshlab bo'lmaydi", loop.player.start(loop.nowNs))
+        loop.run(3.5)
+        assertEquals(AutoPlayer.State.WARMUP, loop.player.state)
+        loop.run(2.0)
+        assertEquals(AutoPlayer.State.READY, loop.player.state)
         assertEquals(0, loop.player.taps)
-        loop.run(1.0)
+        assertTrue(loop.player.start(loop.nowNs))
+        loop.run(3.0)
         assertEquals(AutoPlayer.State.RUNNING, loop.player.state)
+        assertTrue(loop.player.taps > 0)
+    }
+
+    @Test
+    fun startIsRefusedWhileScanning() {
+        val player = AutoPlayer()
+        player.scan(0L)
+        assertFalse(player.start(0L))
+        assertEquals(AutoPlayer.State.SCANNING, player.state)
     }
 
     @Test
     fun placesPerfectlyAndWaitsASecondBetweenBlocks() {
         val loop = Loop(inputLatencyMs = 8.0)
-        loop.player.scan()
+        loop.player.scan(0L)
         loop.run(1.0)
-        loop.player.start(loop.nowNs, 0L)
+        loop.player.start(loop.nowNs)
         loop.run(90.0)
 
         // Lead/τ birinchi bloklarda o'rganiladi; baho o'rganilgandan keyingi qismda.
@@ -156,16 +170,16 @@ class AutoPlayerTest {
     fun learnedCalibrationIsPerfectFromTheFirstBlock() {
         // Birinchi sessiya o'rganadi, ikkinchisi o'sha qiymatlardan boshlaydi.
         val first = Loop(inputLatencyMs = 8.0)
-        first.player.scan()
+        first.player.scan(0L)
         first.run(1.0)
-        first.player.start(first.nowNs, 0L)
+        first.player.start(first.nowNs)
         first.run(60.0)
 
         val second = Loop(inputLatencyMs = 8.0)
         second.player.restoreCalibration(first.player.leadNs, first.player.timeBiasNs)
-        second.player.scan()
+        second.player.scan(0L)
         second.run(1.0)
-        second.player.start(second.nowNs, 0L)
+        second.player.start(second.nowNs)
         second.run(30.0)
         val perfect = second.offsets.count { abs(it) <= 6f }
         println("restored: perfect=$perfect/${second.offsets.size}")
@@ -177,9 +191,9 @@ class AutoPlayerTest {
         // Haqiqiy kechikish 20 ms, boshlang'ich taxmin 8 ms: natijalar bo'yicha
         // lead o'zini to'g'rilashi kerak.
         val loop = Loop(inputLatencyMs = 20.0, baseSpeed = 1200f, growth = 1.02f)
-        loop.player.scan()
+        loop.player.scan(0L)
         loop.run(1.0)
-        loop.player.start(loop.nowNs, 0L)
+        loop.player.start(loop.nowNs)
         loop.run(120.0)
 
         val tail = loop.offsets.takeLast(40)
@@ -188,10 +202,11 @@ class AutoPlayerTest {
         assertTrue("tail perfect=$perfect/${tail.size}", perfect >= tail.size * 85 / 100)
     }
 
+    /** O'yin tugadi: maydon yo'qoladi — qayta skanerlash, «Boshlash» o'chadi. */
     @Test
-    fun lostWhenTheFieldDisappears() {
+    fun rescansWhenTheFieldDisappears() {
         val player = AutoPlayer()
-        player.scan()
+        player.scan(0L)
         var t = 0L
         var x = 300f
         repeat(60) {
@@ -199,11 +214,13 @@ class AutoPlayerTest {
             x += 10f
             player.onFrame(true, x, x + 600f, true, 240f, 840f, t, t, 1080f)
         }
-        player.start(t, 0L)
+        player.start(t)
         repeat(600) {
             t += 8 * ms
             player.onFrame(false, 0f, 0f, false, 0f, 0f, t, t, 1080f)
         }
-        assertEquals(AutoPlayer.State.LOST, player.state)
+        assertEquals(AutoPlayer.State.SCANNING, player.state)
+        assertTrue(player.lostNotice)
+        assertFalse(player.start(t))
     }
 }

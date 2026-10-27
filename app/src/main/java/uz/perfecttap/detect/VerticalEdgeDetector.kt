@@ -51,6 +51,15 @@ class VerticalEdgeDetector(
     var lastPeaks = 0
         private set
 
+    /**
+     * [requireBlockBelow] rejimi: ma'lum blok balandligi va qadami (px, `<= 0` =
+     * noma'lum). Berilsa, ulardan farq qiladigan bo'laklar rad etiladi — blok
+     * ustida suzib chiqadigan «PERFECT!» (≈58 px) / «+2» yozuvlari va hisob
+     * raqamlari harakatlanuvchi blok (≈82 px) o'rniga olinmaydi.
+     */
+    var expectedHeightPx = 0f
+    var expectedPitchPx = 0f
+
     /** Strip brightness: a black strip means the camera does not see the scene. */
     var lastMeanLum = 0f
         private set
@@ -173,19 +182,26 @@ class VerticalEdgeDetector(
         // «PERFECT!»/«+2» yozuvlari ostidagi tirqish katta, shuning uchun o'tmaydi.
         for (a in 0 until blocks) {
             val heightPx = (blockBottom[a] - blockTop[a]) * rowStep
+            if (expectedHeightPx > 0f &&
+                abs(heightPx - expectedHeightPx) > expectedHeightPx * HEIGHT_TOLERANCE
+            ) continue
             val maxGapRows = max(12f, 0.2f * heightPx) / rowStep
             for (b in a + 1 until blocks) {
                 val gap = blockTop[b] - blockBottom[a]
                 if (gap > maxGapRows) break
                 val below = (blockBottom[b] - blockTop[b]) * rowStep
                 if (below < heightPx * 0.6f || below > heightPx * 1.6f) continue
+                val pitchPx = (blockTop[b] - blockTop[a]) * rowStep
+                if (expectedPitchPx > 0f &&
+                    abs(pitchPx - expectedPitchPx) > expectedPitchPx * PITCH_TOLERANCE
+                ) continue
                 return Result(
                     topRow = blockTop[a],
                     bottomRow = blockBottom[a],
                     centerRow = (blockTop[a] + blockBottom[a]) * 0.5f,
                     heightPx = heightPx,
                     peaks = lastPeaks,
-                    pitchPx = (blockTop[b] - blockTop[a]) * rowStep
+                    pitchPx = pitchPx
                 )
             }
         }
@@ -195,5 +211,8 @@ class VerticalEdgeDetector(
     private companion object {
         /** Bundan qorong'i qator — fon (qora osmon, yulduzlar tasmada yo'qoladi). */
         const val BACKGROUND_LUMINANCE = 12f
+        /** Kutilgan balandlik / qadamdan ruxsat etilgan farq (nisbat). */
+        const val HEIGHT_TOLERANCE = 0.2f
+        const val PITCH_TOLERANCE = 0.15f
     }
 }

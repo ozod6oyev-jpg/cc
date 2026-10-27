@@ -64,8 +64,13 @@ class AutoPlayer(private val config: Config = Config()) {
         val widthMatchTolerance: Float = 0.15f,
         /** Blok yoki stack shuncha vaqt ko'rinmasa — qayta skanerlash. */
         val lostTimeoutNs: Long = 4_000_000_000L,
-        /** Natija (yangi stack eni) tapdan shuncha keyin o'lchanadi. */
-        val resultDelayNs: Long = 300_000_000L,
+        /**
+         * Natija (yangi stack eni) tapdan kamida shuncha keyin o'lchanadi —
+         * faqat yangi blok harakatlanayotgan va stack eni barqaror kadrlarda.
+         */
+        val resultDelayNs: Long = 150_000_000L,
+        /** Natija uchun ketma-ket shuncha barqaror kadr kerak. */
+        val resultStableFrames: Int = 3,
         /** Natija shuncha vaqtda o'lchanmasa, kutish to'xtatiladi. */
         val resultTimeoutNs: Long = 1_500_000_000L,
         /**
@@ -157,6 +162,10 @@ class AutoPlayer(private val config: Config = Config()) {
     private var pendingRefWidth = Float.NaN
     private var pendingSpeed = 0f
     private var result: Result? = null
+    // Natija o'lchovi: ketma-ket barqaror kadrlar va oldingi kadrdagi blok markazi.
+    private var resultStable = 0
+    private var resultCandidateWidth = Float.NaN
+    private var prevCenter = Float.NaN
 
     /** Oldingi sessiyada o'rganilgan qiymatlar (xizmat saqlab qo'yadi). */
     fun restoreCalibration(leadNs: Long, timeBiasNs: Long) {
@@ -266,8 +275,20 @@ class AutoPlayer(private val config: Config = Config()) {
         }
         if (state == State.WARMUP && nowNs >= warmupEndNs) state = State.READY
 
-        if (pendingResult && nowNs - pendingTapNs >= config.resultDelayNs && hasStack && stackWidth > 1f) {
-            measureResult(stackLeft, stackWidth)
+        // Yangi blok harakatda (qo'yilgan blok emas) va eni stack bilan teng —
+        // shundagina stack o'lchovi haqiqiy: «PERFECT!»/«+2» yozuvlari va
+        // kamera surilishi paytidagi kadrlar natijani buzmaydi.
+        val center = (left + right) * 0.5f
+        val moving = seen && !prevCenter.isNaN() && abs(center - prevCenter) > 0.5f
+        prevCenter = if (hasBlock) center else Float.NaN
+        if (pendingResult && nowNs - pendingTapNs >= config.resultDelayNs && moving) {
+            if (!resultCandidateWidth.isNaN() && abs(stackWidth - resultCandidateWidth) <= 2f) {
+                resultStable++
+            } else {
+                resultStable = 1
+            }
+            resultCandidateWidth = stackWidth
+            if (resultStable >= config.resultStableFrames) measureResult(stackLeft, stackWidth)
         } else if (pendingResult && nowNs - pendingTapNs > config.resultTimeoutNs) {
             // Stack ko'rinmadi: natijasiz davom etamiz, aks holda tap to'xtab qoladi.
             pendingResult = false
@@ -338,6 +359,8 @@ class AutoPlayer(private val config: Config = Config()) {
         pendingRefLeft = if (refValid) refStackLeft else Float.NaN
         pendingRefWidth = if (refValid) refStackWidth else Float.NaN
         pendingSpeed = plannedSpeed
+        resultStable = 0
+        resultCandidateWidth = Float.NaN
     }
 
     companion object {
@@ -412,6 +435,12 @@ class AutoPlayer(private val config: Config = Config()) {
                 Math.round(errorNs.toDouble() / period)
             } else {
                 0L
+            }
+            // Bir kadrdan ko'p xato — kalibrovka emas, kuzatuv/aniqlash xatosi
+            // (masalan, yozuv blok deb olingan): lead va τ tegilmaydi.
+            if (abs(frames) > 1L) {
+                result = Result(taps, offset, false, stackWidth, leadNs, timeBiasNs, false)
+                return
             }
             val residualNs = errorNs - frames * period
             val step = (residualNs * config.biasGain).toLong()

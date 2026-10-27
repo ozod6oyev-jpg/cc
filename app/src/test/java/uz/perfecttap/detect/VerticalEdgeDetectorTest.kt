@@ -115,4 +115,32 @@ class VerticalEdgeDetectorTest {
         assertTrue(result.topRow in 99.5f..101.5f)
         assertEquals(146f, result.bottomRow, 1.2f)
     }
+
+    /**
+     * Haqiqiy o'yin: perfect qo'yishdan keyin «PERFECT!» yozuvi (≈58 px) yangi
+     * harakatlanuvchi blok (82 px) ustida kichik tirqish bilan suzadi. Shakl
+     * noma'lum bo'lsa yozuv olinadi; ma'lum balandlik/qadam bilan — blok.
+     */
+    @Test
+    fun knownBlockShapeRejectsThePerfectLabelAboveTheBlock() {
+        val rows = 400
+        val pixels = strip(rows) { r ->
+            when (r) {
+                in 100 until 129 -> 200 // yozuv: 58 px
+                in 133 until 174 -> 60  // harakatlanuvchi blok: 82 px
+                in 176 until 217 -> 230 // stack
+                in 219 until 260 -> 230
+                else -> 0
+            }
+        }
+        val detector = VerticalEdgeDetector(stripWidth, rowStep, rows, requireBlockBelow = true)
+        assertEquals(100f, detector.detect(pixels)!!.topRow, 0.5f)
+
+        detector.expectedHeightPx = 82f
+        detector.expectedPitchPx = 86f
+        val result = detector.detect(pixels)!!
+        assertEquals(133f, result.topRow, 0.5f)
+        assertEquals(82f, result.heightPx, 1f)
+        assertEquals(86f, result.pitchPx, 1f)
+    }
 }

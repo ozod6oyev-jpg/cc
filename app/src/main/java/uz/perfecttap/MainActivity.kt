@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import rikka.shizuku.Shizuku
 import uz.perfecttap.capture.CaptureBus
 import uz.perfecttap.capture.CaptureService
 import uz.perfecttap.capture.CaptureStats
@@ -88,9 +89,6 @@ class MainActivity : AppCompatActivity() {
         binding.btnOpenLab.setOnClickListener {
             startActivity(Intent(this, LabActivity::class.java))
         }
-        binding.btnOpenLab.setOnClickListener {
-            startActivity(Intent(this, LabActivity::class.java))
-        }
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -110,10 +108,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         refresh()
     }
 
     override fun onDestroy() {
+        Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         channel?.close()
         channel = null
         super.onDestroy()
@@ -189,18 +189,17 @@ class MainActivity : AppCompatActivity() {
         setBusy(false)
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != SHIZUKU_REQUEST_CODE) return
-        val granted = grantResults.isNotEmpty() &&
-            grantResults[0] == PackageManager.PERMISSION_GRANTED
-        log(if (granted) "Shizuku ruxsati berildi" else "Shizuku ruxsati rad etildi")
-        refresh()
-    }
+    /**
+     * Shizuku ruxsat natijasi Activity.onRequestPermissionsResult ga emas, shu
+     * listener'ga keladi (asosiy oqimda).
+     */
+    private val shizukuPermissionListener =
+        Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+            if (requestCode != SHIZUKU_REQUEST_CODE) return@OnRequestPermissionResultListener
+            val granted = grantResult == PackageManager.PERMISSION_GRANTED
+            log(if (granted) "Shizuku ruxsati berildi" else "Shizuku ruxsati rad etildi")
+            refresh()
+        }
 
     private fun requestShizukuPermission() {
         val state = ShizukuInjector.state()

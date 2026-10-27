@@ -42,7 +42,7 @@ object ShizukuInjector {
         return State(running = true, permissionGranted = granted, version = version)
     }
 
-    /** Shizuku ruxsat so'rovi; natija Activity.onRequestPermissionsResult da keladi. */
+    /** Shizuku ruxsat so'rovi; natija `Shizuku.OnRequestPermissionResultListener` ga keladi. */
     fun requestPermission(requestCode: Int): Boolean = runCatching {
         if (!Shizuku.pingBinder()) return false
         if (Shizuku.isPreV11()) {
@@ -89,11 +89,15 @@ class ShizukuTapChannel(private val inputManager: Any) : TapChannel {
         .apply { isAccessible = true }
 
     override fun tap(x: Float, y: Float, holdMs: Long) {
-        val down = event(MotionEvent.ACTION_DOWN, x, y)
-        val up = event(MotionEvent.ACTION_UP, x, y)
+        val downTime = SystemClock.uptimeMillis()
+        val down = event(downTime, downTime, MotionEvent.ACTION_DOWN, x, y)
+        var up: MotionEvent? = null
         try {
             inject(down)
             Thread.sleep(holdMs)
+            // UP o'sha gestga tegishli (bir xil downTime) va ushlab turishdan
+            // keyingi vaqt bilan yuboriladi.
+            up = event(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y)
             inject(up)
         } catch (_: Throwable) {
             // Shizuku to'xtab qolgan bo'lishi mumkin: ilova yiqilmaydi, holat
@@ -101,16 +105,14 @@ class ShizukuTapChannel(private val inputManager: Any) : TapChannel {
             failedTaps++
         } finally {
             down.recycle()
-            up.recycle()
+            up?.recycle()
         }
     }
 
-    private fun event(action: Int, x: Float, y: Float): MotionEvent {
-        val now = SystemClock.uptimeMillis()
-        return MotionEvent.obtain(now, now, action, x, y, 0).apply {
+    private fun event(downTime: Long, eventTime: Long, action: Int, x: Float, y: Float): MotionEvent =
+        MotionEvent.obtain(downTime, eventTime, action, x, y, 0).apply {
             setSource(InputDevice.SOURCE_TOUCHSCREEN)
         }
-    }
 
     private fun inject(event: MotionEvent) {
         // mode 0 = INJECT_INPUT_EVENT_MODE_ASYNC: qaytishni kutmasdan yuboradi,

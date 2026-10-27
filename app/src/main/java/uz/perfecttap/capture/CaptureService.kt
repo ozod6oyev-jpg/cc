@@ -125,9 +125,13 @@ class CaptureService : Service() {
     private var lastPublishNs = 0L
     private var lastHeapBytes = 0L
     private var lastHeapSampleNs = 0L
+    // UI oqimida yoziladi, kadr oqimida o'qiladi.
+    @Volatile
     private var active = false
+    @Volatile
     private var labMode = false
     /** Lab ROI pastki chegarasi (panel tepasi); 0 = cheklanmagan. */
+    @Volatile
     private var roiBottomY = 0
     /** Oxirgi marta blok ko'rilgan vaqt; tasmani qayta markazlash uchun. */
     private var lastBlockSeenNs = 0L
@@ -153,7 +157,11 @@ class CaptureService : Service() {
                 val roi = intent.getIntExtra(EXTRA_ROI_BOTTOM, 0)
                 if (roi > 0 && roi != roiBottomY) {
                     roiBottomY = roi
-                    if (labMode) rebuildLabReaders()
+                    // Tasma kadr oqimida ishlatiladi: uni o'sha oqimda almashtiramiz,
+                    // aks holda kadr yangi tasmani eski detektor bilan o'qishi mumkin.
+                    if (labMode) {
+                        captureHandler?.post { rebuildLabReaders() } ?: rebuildLabReaders()
+                    }
                 }
                 Log.i(TAG, "lab mode -> $labMode (active=$active, roiBottom=$roiBottomY)")
                 if (!labMode) CaptureBus.clearLabFrames()
@@ -565,36 +573,40 @@ class CaptureService : Service() {
         // proses SIGSEGV bilan o'ladi. Shuning uchun yopish kadr oqimining
         // o'zida bajariladi: u yerda onFrameAvailable ham ishlaydi va ular
         // hech qachon parallel bo'lmaydi.
-        val teardown = Runnable {
-            runCatching { imageReader?.setOnImageAvailableListener(null, null) }
-            runCatching { virtualDisplay?.release() }
-            runCatching { imageReader?.close() }
-            runCatching { projection?.stop() }
-            projection = null
-            virtualDisplay = null
-            imageReader = null
-            scanline = null
-            detector = null
-            stackDetector = null
-            stripReader = null
-            verticalDetector = null
-        }
+        // Resurslar lokal o'zgaruvchilarga olinadi va maydonlar darhol tozalanadi:
+        // to'xtatishdan keyin tez qayta boshlansa, kechiktirilgan teardown yangi
+        // sessiyaning reader/projection/oqimini yopib yubormasligi kerak.
+        val reader = imageReader
+        val display = virtualDisplay
+        val oldProjection = projection
+        val thread = captureThread
         val handler = captureHandler
-        val onCaptureThread = handler != null &&
+        projection = null
+        virtualDisplay = null
+        imageReader = null
+        captureThread = null
+        captureHandler = null
+        scanline = null
+        detector = null
+        stackDetector = null
+        stripReader = null
+        verticalDetector = null
+
+        val teardown = Runnable {
+            runCatching { reader?.setOnImageAvailableListener(null, null) }
+            runCatching { display?.release() }
+            runCatching { reader?.close() }
+            runCatching { oldProjection?.stop() }
+        }
+        val postToCaptureThread = handler != null &&
             handler.looper.thread.isAlive &&
             Thread.currentThread() !== handler.looper.thread
-        if (wasActive && onCaptureThread) {
+        if (wasActive && postToCaptureThread) {
             handler!!.post(teardown)
-            handler.post {
-                captureThread?.quitSafely()
-                captureThread = null
-                captureHandler = null
-            }
+            handler.post { thread?.quitSafely() }
         } else {
             teardown.run()
-            captureThread?.quitSafely()
-            captureThread = null
-            captureHandler = null
+            thread?.quitSafely()
         }
 
         CaptureBus.running.value = false

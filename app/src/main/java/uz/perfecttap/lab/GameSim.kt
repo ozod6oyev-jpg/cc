@@ -27,7 +27,9 @@ class GameSim(
         val offsetPx: Float,
         val perfect: Boolean,
         val cameraShifted: Boolean,
-        val widthPx: Float
+        val widthPx: Float,
+        /** Blok stackka umuman tegmadi: u tushib ketadi, stack o'zgarmaydi. */
+        val missed: Boolean = false
     )
 
     /** Placed block geometry, newest first. */
@@ -60,6 +62,9 @@ class GameSim(
     var perfectCount = 0
         private set
     var cameraShifts = 0
+        private set
+    /** Stackka umuman tegmagan bosishlar soni. */
+    var misses = 0
         private set
 
     /** Boshlang'ich tezlik (px/s); slider shu qiymatni o'zgartiradi. */
@@ -106,6 +111,7 @@ class GameSim(
         placed = 0
         perfectCount = 0
         cameraShifts = 0
+        misses = 0
         applySpeed()
         addBlock(stackX, topY, width, 0)
     }
@@ -139,9 +145,16 @@ class GameSim(
         val perfect = abs(offset) <= perfectTolerancePx
         var shifted = false
 
+        if (abs(offset) >= width) {
+            // Ustma-ust tushadigan qism yo'q: blok tushib ketadi. Eni 0 bo'lgan
+            // blok qo'shilmaydi, keyingi blok shu stack ustida qayta chiqadi.
+            misses++
+            movingX = stackX
+            return Placement(offset, perfect = false, cameraShifted = false, widthPx = width, missed = true)
+        }
+
         if (!perfect) {
-            val cut = abs(offset).coerceAtMost(width * 0.9f)
-            width = (width - cut).coerceAtLeast(blockWidth * 0.2f)
+            width -= abs(offset)
         } else {
             perfectCount++
         }
@@ -150,7 +163,9 @@ class GameSim(
         // The surviving part is the overlap of the moving block and the stack, so the
         // new block starts at the rightmost left edge. That edge is the stack's new
         // reference: the next block respawns centred on it.
-        val left = maxOf(movingX, stackX)
+        // Perfect qo'yishda blok stackka «yopishadi»: eni kesilmagani uchun
+        // siljigan holda qoldirilsa, u stackdan offset px osilib qolardi.
+        val left = if (perfect) stackX else maxOf(movingX, stackX)
         stackX = left
         addBlock(left, topY - blockHeight, width, placed)
 

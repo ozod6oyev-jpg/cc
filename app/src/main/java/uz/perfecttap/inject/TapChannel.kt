@@ -269,7 +269,10 @@ class TapChannelFactory(private val root: RootManager) {
         }
 
         log += "Bevosita yozib bo'lmadi (SELinux) — root shell oqimiga o'tildi"
-        val encoder = EvdevEncoder(is64Bit = is64BitAbi())
+        // Bu yerda baytlarni ilova emas, root shell yozadi: struct input_event
+        // o'lchami shell jarayonining bitligiga bog'liq (32-bit ilova 64-bit
+        // qurilmada ishlasa ham shell 64-bit bo'ladi).
+        val encoder = EvdevEncoder(is64Bit = isDevice64Bit())
         ShellSession.open(path, log)?.let { session ->
             log += "Yozish usuli: root shell (${session.command})"
             return Result(
@@ -322,4 +325,6 @@ class TapChannelFactory(private val root: RootManager) {
     }
 
     private fun is64BitAbi(): Boolean = android.os.Process.is64Bit()
+
+    private fun isDevice64Bit(): Boolean = android.os.Build.SUPPORTED_64_BIT_ABIS.isNotEmpty()
 }

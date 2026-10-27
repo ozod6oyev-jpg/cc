@@ -51,6 +51,11 @@ class AutoPlacer(
     private var observations = 0
     private var lastPlaceArrivalNs = Long.MIN_VALUE / 2
     private var placedOnce = false
+    /**
+     * Qo'yishdan oldingi holatni ko'rsatuvchi kadrlar (oqim kechikishi tufayli
+     * qo'yishdan keyin ham kelib turadi) e'tiborga olinmaydi.
+     */
+    private var ignoreContentBeforeNs = Long.MIN_VALUE
 
     fun reset() {
         lastReason = REASON_IDLE
@@ -62,6 +67,7 @@ class AutoPlacer(
         observations = 0
         lastPlaceArrivalNs = Long.MIN_VALUE / 2
         placedOnce = false
+        ignoreContentBeforeNs = Long.MIN_VALUE
     }
 
     /**
@@ -81,6 +87,12 @@ class AutoPlacer(
         nowNs: Long,
         screenWidthPx: Float
     ): Decision {
+        // Kadr hali qo'yishdan oldingi sahnani ko'rsatyapti: eski blok va eski
+        // stack yangi tezlik namunalariga aralashsa, keyingi bashorat buziladi.
+        if (contentTimestampNs < ignoreContentBeforeNs) {
+            lastReason = REASON_STALE
+            return Decision(-1L, centerX, stackCenterX, speedPxPerSec)
+        }
         if (stackRight - stackLeft > 1f) {
             stackCenterX = (stackLeft + stackRight) * 0.5f
         }
@@ -181,12 +193,17 @@ class AutoPlacer(
         if (sampleCount < SAMPLES) return
         val fit = fitVelocity()
         if (fit == 0f) return
-        // Residual of the newest sample against the fit: a bounce shows up here.
-        val predictedNewest = sampleX[0] + fit * ((sampleNs[SAMPLES - 1] - sampleNs[0]) / 1_000_000_000f)
+        // Residual of the newest sample against the fitted line (which passes
+        // through the sample means): a bounce shows up here.
+        val predictedNewest = fitMeanX +
+            fit * ((sampleNs[SAMPLES - 1] - fitMeanNs) / 1_000_000_000.0).toFloat()
         if (abs(predictedNewest - sampleX[SAMPLES - 1]) <= FIT_TOLERANCE_PX) {
             speedPxPerSec = fit
         }
     }
+
+    private var fitMeanNs = 0.0
+    private var fitMeanX = 0f
 
     private fun fitVelocity(): Float {
         var meanT = 0.0
@@ -198,6 +215,8 @@ class AutoPlacer(
         }
         meanT /= count
         meanX /= count
+        fitMeanNs = meanT
+        fitMeanX = meanX.toFloat()
         var num = 0.0
         var den = 0.0
         for (i in 0 until count) {
@@ -222,10 +241,16 @@ class AutoPlacer(
         return if (t <= span) Pair(lo + t, 1f) else Pair(hi - (t - span), -1f)
     }
 
-    /** Called right after the block was actually placed. */
-    fun onPlaced(arrivalNs: Long) {
+    /**
+     * Called right after the block was actually placed. [placedAtNs] is the tap's
+     * own time (content clock); frames showing the scene before it are ignored.
+     */
+    fun onPlaced(arrivalNs: Long, placedAtNs: Long = arrivalNs) {
         placedOnce = true
         lastPlaceArrivalNs = arrivalNs
+        ignoreContentBeforeNs = placedAtNs
+        // The top of the stack changed (a cut moves its centre): re-measure it.
+        stackCenterX = Float.NaN
         // The block respawns at the stack centre, so the previous velocity is stale.
         prevX = Float.NaN
         prevContentNs = 0L
@@ -245,10 +270,11 @@ class AutoPlacer(
         const val REASON_TOO_SLOW = "sekin"
         const val REASON_MISSED = "o_tib_ketdi"
         const val REASON_FAR = "uzoq"
+        const val REASON_STALE = "eski_kadr"
 
         /** Lab playfield margin, the same 6% the game geometry uses. */
         private const val PLAYFIELD_MARGIN = 0.06f
-        private const val SAMPLES = 3
+        const val SAMPLES = 6
         /** Observations the tracker wants before its first placement. */
         const val WARMUP_OBSERVATIONS = 10
         const val FIT_TOLERANCE_PX = 12f

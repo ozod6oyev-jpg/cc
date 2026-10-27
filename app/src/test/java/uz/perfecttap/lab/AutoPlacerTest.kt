@@ -58,11 +58,10 @@ class AutoPlacerTest {
     @Test
     fun schedulesAheadOfTimeWhenTheCrossingIsAFewMsAway() {
         val placer = AutoPlacer().warmUp()
-        placer.observe(540f, 0)
-        placer.observe(560f, 50)
-        placer.observe(552f, 75)
-        placer.observe(544f, 100)
-        val decision = placer.observe(540.4f, 125)
+        // -320 px/s across a full speed window; the last frame is 0.4 px short.
+        val last = AutoPlacer.SAMPLES - 1
+        for (k in 0 until last) placer.observe(540.4f + 8f * (last - k), k * 25L)
+        val decision = placer.observe(540.4f, last * 25L)
 
         assertTrue("schedule=${decision.scheduleInNs}", decision.scheduleInNs in 1..20 * ms)
     }
@@ -161,9 +160,7 @@ class AutoPlacerTest {
 
         // Namunalar to'ldi, lekin birinchi supurish hali tugamagan.
         val firstSweep = AutoPlacer()
-        firstSweep.observe(540f, 0)
-        firstSweep.observe(530f, 50)
-        firstSweep.observe(535f, 75)
+        repeat(AutoPlacer.SAMPLES) { firstSweep.observe(530f + it * 2f, it * 25L) }
         assertEquals(AutoPlacer.REASON_FIRST_SWEEP, firstSweep.lastReason)
     }
 

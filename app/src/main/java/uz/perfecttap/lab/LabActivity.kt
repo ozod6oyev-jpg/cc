@@ -154,7 +154,8 @@ class LabActivity : AppCompatActivity() {
                 perfect = placement.perfect,
                 cameraShifted = placement.cameraShifted,
                 widthPx = placement.widthPx,
-                tapIndex = clicker.taps
+                tapIndex = clicker.taps,
+                missed = placement.missed
             )
             renderGame()
         }
@@ -213,8 +214,11 @@ class LabActivity : AppCompatActivity() {
         clicker.reset()
         // ROI panel tepasigacha; o'yin maydoni ham shu chegaradan yuqorida boshlanadi
         // (aks holda birinchi blok panel ortida qolib, kamera uni ko'rmaydi).
-        roiBottomY = panelTopPx()
-        binding.labView.playfieldBottomPx = roiBottomY
+        // ROI ekran oqimida — ekran koordinatasida; o'yin maydoni esa view
+        // koordinatasida. Status bar ularni ~100 px ga siljitadi: aralashtirilsa,
+        // Y-tasma harakatlanayotgan blokning pastki qirrasiga yetmay qoladi.
+        roiBottomY = panelTopOnScreenPx()
+        binding.labView.playfieldBottomPx = panelTopInViewPx()
         binding.labView.start()
         streamStats.reset()
         inputStats.reset()
@@ -566,9 +570,18 @@ class LabActivity : AppCompatActivity() {
      * Tahlil ROI'ning pastki chegarasi — panel tepasi. Panel chegarasi kuchli
      * qirra bo'lgani uchun Y-tracking o'sha yerga «yopishib» qolmasligi kerak.
      */
-    private fun panelTopPx(): Int {
+    private fun panelTopInViewPx(): Int {
         val top = binding.panel.top
         return if (top > 0) top else (binding.labView.height * 0.85f).toInt()
+    }
+
+    /** Panel tepasi ekran koordinatasida (kadr shu koordinatada o'qiladi). */
+    private fun panelTopOnScreenPx(): Int {
+        val panel = IntArray(2)
+        val view = IntArray(2)
+        binding.panel.getLocationOnScreen(panel)
+        binding.labView.getLocationOnScreen(view)
+        return if (binding.panel.top > 0) panel[1] else view[1] + panelTopInViewPx()
     }
 
     private companion object {
@@ -606,11 +619,13 @@ class LabActivity : AppCompatActivity() {
         // O'lchov paytida avto-qo'yish to'xtatiladi: tap'lar o'yin hisobiga tushmasin.
         measureActive = true
         clicker.stop()
+        var channel: TapChannel? = null
         try {
             inputMessage = R.string.lab_input_empty
             // Root bo'lsa evdev yo'li, bo'lmasa Shizuku (shell) yo'li.
-            val channel = openTapChannel()
-            if (channel == null) {
+            val opened = openTapChannel()
+            channel = opened
+            if (opened == null) {
                 inputMessage = R.string.lab_input_no_service
                 recorder?.event("input", "measure skipped: no tap channel (no root, no Shizuku)")
                 return@launch
@@ -634,17 +649,16 @@ class LabActivity : AppCompatActivity() {
                     INPUT_TAP_INTERVAL_MS,
                     x,
                     y,
-                    channel.javaClass.simpleName
+                    opened.javaClass.simpleName
                 )
             )
             repeat(INPUT_TAPS) {
                 // Vaqt `System.nanoTime()` bilan olinadi — ms yaxlitlashi yo'q.
                 pendingTapNs = System.nanoTime()
-                withContext(Dispatchers.IO) { channel.tap(x, y) }
+                withContext(Dispatchers.IO) { opened.tap(x, y) }
                 delay(INPUT_TAP_INTERVAL_MS.toLong())
                 pendingTapNs = 0L
             }
-            channel.close()
             recorder?.summary(
                 "input",
                 inputStats.samples,
@@ -654,6 +668,8 @@ class LabActivity : AppCompatActivity() {
                 "delta_input measurement"
             )
         } finally {
+            // Xato yoki bekor qilishda ham root shell / fd yopilsin.
+            channel?.let { runCatching { it.close() } }
             inputBusy = false
             measureActive = false
             pendingTapNs = 0L
@@ -743,7 +759,8 @@ class LabActivity : AppCompatActivity() {
         active.event(
             "session",
             "end reason=$reason blocks=${sim?.placed ?: 0} " +
-                "perfect=${sim?.perfectCount ?: 0} camera=${sim?.cameraShifts ?: 0} " +
+                "perfect=${sim?.perfectCount ?: 0} miss=${sim?.misses ?: 0} " +
+                "camera=${sim?.cameraShifts ?: 0} " +
                 "taps=${clicker.taps} missed=$missedFrames rows=${active.rowsWritten}"
         )
         active.close()

@@ -182,9 +182,15 @@ class GameView @JvmOverloads constructor(
             blockHeight = blockWidth * 0.15f
         )
         simulation?.apply {
+            // Yangi o'lchamda ham stack panel ustidan boshlanadi.
+            startTopY = playfieldStartY()
+            reset()
             baseSpeedPxPerSec = motionBaseSpeedPxPerSec
             speedGrowthPerBlock = motionGrowthPerBlock
         }
+        // Eski chizilgan pozitsiyalar yangi geometriyaga tegishli emas.
+        ring.clear()
+        lastFrameNs = 0L
         val metrics = resources.displayMetrics
         val dpi = metrics.xdpi.takeIf { it > 1f } ?: metrics.densityDpi.toFloat()
         tapRadiusPx = 2f / 2.54f * dpi // 2 sm radius

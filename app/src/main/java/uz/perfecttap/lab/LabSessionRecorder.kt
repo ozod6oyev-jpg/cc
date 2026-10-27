@@ -158,7 +158,8 @@ class LabSessionRecorder(
         perfect: Boolean,
         cameraShifted: Boolean,
         widthPx: Float,
-        tapIndex: Int
+        tapIndex: Int,
+        missed: Boolean = false
     ) {
         enqueue(
             Record(
@@ -168,7 +169,8 @@ class LabSessionRecorder(
                 perfect = if (perfect) 1 else 0,
                 cameraShift = if (cameraShifted) 1 else 0,
                 tap = tapIndex,
-                note = "width_px=" + String.format(Locale.US, "%.2f", widthPx)
+                note = "width_px=" + String.format(Locale.US, "%.2f", widthPx) +
+                    if (missed) " missed=1" else ""
             )
         )
     }

@@ -24,12 +24,11 @@ import kotlin.math.roundToLong
  * Har bir blok avvalgisidan biroz tezroq yuradi: tezlik har qo'yishdan keyin
  * qaytadan o'lchanadi ([AutoPlacer.onPlaced]).
  *
- * Qo'yish natijasidan ikki narsa o'zini o'zi to'g'rilaydi (stack eni qisqarsa,
- * qaysi tomondan kesilganiga qarab blok erta yoki kech tushgani aniqlanadi):
- *  · [timeBiasNs] — nishon vaqti tuzatishi: o'yin kadrining haqiqiy yoshi va
- *    bosish qaysi kadrda qabul qilinishi (labdagi 27 ms dan farq qiladi);
- *  · [leadNs] — bosishni nishon kadridan qancha oldin yuborish. Blok butun
- *    kadr(lar)ga adashsa, lead yarim kadr qadamda suriladi.
+ * Qo'yish natijasidan bosish vaqti o'zini o'zi to'g'rilaydi (stack eni
+ * qisqarsa, qaysi tomondan kesilganiga qarab blok erta yoki kech tushgani
+ * aniqlanadi): [leadNs] — bosishni nishon kadridan qancha oldin yuborish —
+ * kichik qadamlarda suriladi, xato bir tomonga takrorlansa qadam kattalashadi.
+ * Lead chegaradan chiqsa, qoldiq [timeBiasNs] ga (nishon vaqti tuzatishi) o'tadi.
  */
 class AutoPlayer(private val config: Config = Config()) {
 
@@ -42,12 +41,27 @@ class AutoPlayer(private val config: Config = Config()) {
         val settleNs: Long = 120_000_000L,
         /** Kadr kontenti kadr vaqtidan shuncha oldingi holat (labda o'lchangan Δ_stream). */
         val streamDelayNs: Long = 27_000_000L,
-        /** Tap yuborilgandan o'yin uni qabul qilguncha (Δ_input + kadr chegarasi). */
-        val initialLeadNs: Long = 8_000_000L,
+        /**
+         * Tap yuborilgandan o'yin uni qabul qilguncha (Δ_input + kadr chegarasi)
+         * va nishon tuzatishining boshlang'ich qiymati. Haqiqiy o'yinda (211356)
+         * lead 12.17 / τ −3.69 ms bilan 70 ta blok ketma-ket perfect bo'lgan;
+         * perfect oynasining markazi shu atrofda.
+         */
+        val initialLeadNs: Long = 12_170_000L,
+        val initialTimeBiasNs: Long = -3_690_000L,
         val minLeadNs: Long = 0L,
         val maxLeadNs: Long = 60_000_000L,
-        /** Natijadan lead'ni qanchalik to'g'rilash (0..1) va bir qadamdagi chegara. */
+        /**
+         * Natijadan bosish vaqtini qanchalik to'g'rilash (0..1). Bir qadam
+         * [calibrationStepNs] bilan cheklanadi; xato ketma-ket bir tomonga
+         * bo'lsa chegara ikki barobardan [maxBiasStepNs] gacha o'sadi.
+         *
+         * Haqiqiy o'yinda (211356) xato kadrlarga bo'lingan (±16..29 ms) va
+         * ishorasi tasodifiy: har xatoda lead'ni bir kadrga surish uni 12 dan
+         * 37 ms gacha «sayr» qildirdi va erta tushishlarning yarmini o'zi keltirdi.
+         */
         val biasGain: Float = 0.6f,
+        val calibrationStepNs: Long = 2_000_000L,
         val maxBiasStepNs: Long = 12_000_000L,
         val maxBiasNs: Long = 80_000_000L,
         /** Stack eni shundan kam qisqarsa — perfect. */
@@ -94,9 +108,12 @@ class AutoPlayer(private val config: Config = Config()) {
          * Eng yaqin displey kadrida blok stack markazidan shundan uzoq bo'lsa,
          * bu o'tish tashlab yuboriladi va blokning keyingi qaytishi kutiladi.
          * Tez blok kadrda ~22 px yuradi: aks holda ba'zi o'tishlarda perfect
-         * zonaga birorta kadr ham tushmaydi.
+         * zonaga birorta kadr ham tushmaydi. Haqiqiy o'yinda tezlik ~1300 px/s
+         * da to'xtaydi (kadrda 10.8 px, xato ≤ 5.4 px) va perfect chegarasi
+         * ~20 px: 3 px talab o'tishlarning yarmini behuda o'tkazib, har tapga
+         * ~0.8 s qo'shardi (211356).
          */
-        val maxFrameErrorPx: Float = 3f,
+        val maxFrameErrorPx: Float = 5f,
         /**
          * Shuncha vaqt mos kadr topilmasa, eng yaqin kadr qabul qilinadi: chetda
          * to'xtab qaytadigan blokda kadr fazasi har o'tishda takrorlanishi mumkin.
@@ -133,7 +150,8 @@ class AutoPlayer(private val config: Config = Config()) {
     private val placer = AutoPlacer(
         cooldownNs = config.settleNs,
         learnPlayfield = true,
-        minLegSamples = config.minLegSamples
+        minLegSamples = config.minLegSamples,
+        speedPrior = true
     )
 
     var state = State.IDLE
@@ -147,7 +165,7 @@ class AutoPlayer(private val config: Config = Config()) {
     var leadNs = config.initialLeadNs
         private set
     /** Nishon vaqti tuzatishi (musbat = blok kech tushardi → ertaroq nishon). */
-    var timeBiasNs = 0L
+    var timeBiasNs = config.initialTimeBiasNs
         private set
     val speedPxPerSec: Float get() = placer.speedPxPerSec
     /** Nega hozir tap yo'q (`AutoPlacer.REASON_*` yoki holat sababi). */
@@ -205,6 +223,9 @@ class AutoPlayer(private val config: Config = Config()) {
     private var staticFrames = 0
     private var missedFrames = 0
     private var untrackedNotice = false
+    /** Oxirgi xatolar ishorasi (+1 kech / -1 erta / 0) va ketma-ket soni. */
+    private var lastErrorSign = 0
+    private var errorStreak = 0
 
     /** Oldingi sessiyada o'rganilgan qiymatlar (xizmat saqlab qo'yadi). */
     fun restoreCalibration(leadNs: Long, timeBiasNs: Long) {
@@ -488,6 +509,8 @@ class AutoPlayer(private val config: Config = Config()) {
         // kamera boshqa narsani o'lchagan: natija sanaladi, lekin lead tegilmaydi.
         val trusted = shrink > -config.perfectWidthTolerancePx && shrink < refWidth * 0.5f
         if (shrink <= config.perfectWidthTolerancePx) {
+            lastErrorSign = 0
+            errorStreak = 0
             perfectCount++
             result = Result(taps, 0f, true, stackWidth, leadNs, timeBiasNs, trusted, Float.NaN, pendingSpeed)
             return
@@ -500,41 +523,28 @@ class AutoPlayer(private val config: Config = Config()) {
             // Harakat yo'nalishida oldinga tushdi = tap kech ketdi → lead oshadi.
             val errorNs = (offset / speed * 1_000_000_000f).toLong()
             val period = lastFramePeriodNs
-            // Kadr panjarasida xato = butun kadrlar (bosish boshqa kadrga tushdi)
-            // + kadr ichidagi qoldiq (bashorat xatosi). Butun qismi lead'ni yarim
-            // kadr qadamda suradi — bosish qabul oynasining o'rtasiga keladi va
-            // chegarada tebranmaydi; qoldiq nishon vaqtini to'g'rilaydi.
-            // Yarim kadr atrofidagi xato ikki ma'noli: u kadr xatosi deb faqat
-            // aniq bir kadrga yaqin bo'lsa (>= 0.75 kadr) hisoblanadi.
-            val frames = if (period > 0L && abs(errorNs) >= period * 3 / 4) {
-                Math.round(errorNs.toDouble() / period)
-            } else {
-                0L
-            }
             // Juda katta xato — kalibrovka emas, kuzatuv/aniqlash xatosi (masalan,
-            // yozuv blok deb olingan): lead va τ tegilmaydi. Haqiqiy o'yinda
-            // noto'g'ri saqlangan τ 2-4 kadrlik muntazam xato beradi — u o'rganilishi
-            // shart, shuning uchun chegara bir kadr emas, [maxCalibrationErrorFrames].
-            if (abs(frames) > config.maxCalibrationErrorFrames) {
+            // yozuv blok deb olingan): lead va τ tegilmaydi. Noto'g'ri saqlangan τ 2-4
+            // kadrlik muntazam xato beradi — u o'rganilishi shart, shuning uchun
+            // chegara bir kadr emas, [maxCalibrationErrorFrames].
+            if (period > 0L && abs(errorNs) > config.maxCalibrationErrorFrames * period + period / 2) {
                 result = Result(taps, offset, false, stackWidth, leadNs, timeBiasNs, false, errorMs(offset, speed), speed)
                 return
             }
-            val residualNs = errorNs - frames * period
-            val step = (residualNs * config.biasGain).toLong()
-                .coerceIn(-config.maxBiasStepNs, config.maxBiasStepNs)
-            timeBiasNs = (timeBiasNs + step).coerceIn(-config.maxBiasNs, config.maxBiasNs)
-            if (frames != 0L) {
-                // Lead chegaradan chiqsa, tuzatish τ ga o'tadi: avval lead bir
-                // davrga «aylanib» qaytardi va tuzatish yo'qolardi (lead 0 da
-                // turganda erta tushish hech qachon to'g'rilanmasdi).
-                val shift = frames * period / 2
-                val lead = leadNs + shift
-                if (lead in config.minLeadNs..config.maxLeadNs) {
-                    leadNs = lead
-                } else {
-                    timeBiasNs = (timeBiasNs + shift).coerceIn(-config.maxBiasNs, config.maxBiasNs)
-                }
-            }
+            // Bitta xato tasodifiy bo'lishi mumkin — kichik qadam; bir tomonga
+            // takrorlansa (kalibrovka haqiqatan siljigan) qadam 2x, 4x o'sadi.
+            val sign = if (errorNs > 0L) 1 else -1
+            errorStreak = if (sign == lastErrorSign) errorStreak + 1 else 1
+            lastErrorSign = sign
+            val capNs = (config.calibrationStepNs shl (errorStreak - 1).coerceAtMost(2))
+                .coerceAtMost(config.maxBiasStepNs)
+            val step = (errorNs * config.biasGain).toLong().coerceIn(-capNs, capNs)
+            // Lead bosishning kadr panjarasidagi fazasini belgilaydi (nishon kadr
+            // chegarada); chegaradan chiqqan qismi nishon tuzatishiga o'tadi, aks
+            // holda lead 0 da turganda erta tushish hech qachon to'g'rilanmasdi.
+            val lead = (leadNs + step).coerceIn(config.minLeadNs, config.maxLeadNs)
+            timeBiasNs = (timeBiasNs + step - (lead - leadNs)).coerceIn(-config.maxBiasNs, config.maxBiasNs)
+            leadNs = lead
         }
         result = Result(taps, offset, false, stackWidth, leadNs, timeBiasNs, trusted, errorMs(offset, speed), speed)
     }

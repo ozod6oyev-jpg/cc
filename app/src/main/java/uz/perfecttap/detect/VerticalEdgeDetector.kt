@@ -186,9 +186,24 @@ class VerticalEdgeDetector(
                 runStart = -1
             }
         }
-        // Tagida (kichik tirqish bilan) o'xshash balandlikdagi blok turgan eng
-        // yuqori blok — stack ustidagi harakatlanuvchi blok. «0» raqami va
-        // «PERFECT!»/«+2» yozuvlari ostidagi tirqish katta, shuning uchun o'tmaydi.
+        val onStack = blockOnStack(blocks)
+        val tracking = expectedHeightPx > 0f && expectedCenterRow >= 0f && maxJumpRows > 0f
+        if (!tracking) return onStack
+        // Kuzatuv davom etyapti: kutilgan joy yaqinidagi blok tagida blok bo'lmasa
+        // ham olinadi. Tor stackda (211356: 38 px) harakatlanuvchi blok deyarli
+        // doim stack ustida emas — tagida blok talab qilinsa, tasma qo'yishdan
+        // keyingi kamera surilishiga ergashmay, blok har safar ~1 s yo'qolardi.
+        val trackRows = maxJumpRows * TRACK_JUMP_SHARE
+        if (onStack != null && abs(onStack.centerRow - expectedCenterRow) <= trackRows) return onStack
+        return loneBlock(blocks, trackRows) ?: onStack
+    }
+
+    /**
+     * Tagida (kichik tirqish bilan) o'xshash balandlikdagi blok turgan eng
+     * yuqori blok — stack ustidagi harakatlanuvchi blok. «0» raqami va
+     * «PERFECT!»/«+2» yozuvlari ostidagi tirqish katta, shuning uchun o'tmaydi.
+     */
+    private fun blockOnStack(blocks: Int): Result? {
         for (a in 0 until blocks) {
             val heightPx = (blockBottom[a] - blockTop[a]) * rowStep
             if (expectedHeightPx > 0f &&
@@ -220,9 +235,38 @@ class VerticalEdgeDetector(
         return null
     }
 
+    /** Kutilgan balandlikdagi, kutilgan markazga eng yaqin bo'lak ([trackRows] ichida). */
+    private fun loneBlock(blocks: Int, trackRows: Float): Result? {
+        var best = -1
+        var bestDistance = Float.MAX_VALUE
+        for (a in 0 until blocks) {
+            val heightPx = (blockBottom[a] - blockTop[a]) * rowStep
+            if (abs(heightPx - expectedHeightPx) > expectedHeightPx * HEIGHT_TOLERANCE) continue
+            val distance = abs((blockTop[a] + blockBottom[a]) * 0.5f - expectedCenterRow)
+            if (distance > trackRows || distance >= bestDistance) continue
+            best = a
+            bestDistance = distance
+        }
+        if (best < 0) return null
+        val heightPx = (blockBottom[best] - blockTop[best]) * rowStep
+        return Result(
+            topRow = blockTop[best],
+            bottomRow = blockBottom[best],
+            centerRow = (blockTop[best] + blockBottom[best]) * 0.5f,
+            heightPx = heightPx,
+            peaks = lastPeaks,
+            pitchPx = if (expectedPitchPx > 0f) expectedPitchPx else heightPx
+        )
+    }
+
     private companion object {
         /** Bundan qorong'i qator — fon (qora osmon, yulduzlar tasmada yo'qoladi). */
         const val BACKGROUND_LUMINANCE = 12f
+        /**
+         * Kuzatuvda blok kutilgan joydan [maxJumpRows] ning shu ulushidan uzoq
+         * bo'lmasligi kerak (≈0.75 qadam): bir qadam pastdagi stack bloki olinmaydi.
+         */
+        const val TRACK_JUMP_SHARE = 0.5f
         /** Kutilgan balandlik / qadamdan ruxsat etilgan farq (nisbat). */
         const val HEIGHT_TOLERANCE = 0.2f
         const val PITCH_TOLERANCE = 0.15f

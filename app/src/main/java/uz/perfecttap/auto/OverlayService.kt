@@ -62,10 +62,14 @@ class OverlayService : Service() {
         private val WARMUP_CHOICES_S = intArrayOf(5, 10, 0)
         /** Tap nuqtasi: ekran markazi (o'yin har joyga bosishni qabul qiladi). */
         private const val TAP_Y_FRACTION = 0.5f
-        /** O'rganilgan lead / nishon tuzatishi keyingi sessiyalar uchun saqlanadi. */
+        /**
+         * O'rganilgan lead / nishon tuzatishi keyingi sessiyalar uchun saqlanadi.
+         * v2: v0.6.7 gacha lead har xatoda bir kadrga «sayr» qilardi — o'sha
+         * saqlangan qiymatlar o'qilmaydi, yangi boshlang'ich qiymatdan boshlanadi.
+         */
         private const val PREFS = "auto_calibration"
-        private const val KEY_LEAD = "lead_ns"
-        private const val KEY_BIAS = "bias_ns"
+        private const val KEY_LEAD = "lead_ns_v2"
+        private const val KEY_BIAS = "bias_ns_v2"
         /** Diagnostika: skanerlash paytidagi kadrlar (PNG). */
         private const val MAX_SNAPSHOTS = 5
         private const val SNAPSHOT_EVERY_NS = 3_000_000_000L

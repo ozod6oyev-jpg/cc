@@ -23,13 +23,17 @@ class AutoPlayerTest {
         val noisePx: Float = 0.7f,
         /** Bosish kechikishining tebranishi (±ms), Shizuku o'lchovidagidek. */
         val latencyJitterMs: Double = 1.0,
+        /** Shu ehtimol bilan bosish ±[outlierMs] ga adashadi (haqiqiy o'yindagi sakrashlar). */
+        val outlierChance: Double = 0.0,
+        val outlierMs: Double = 0.0,
         baseSpeed: Float = 1500f,
         growth: Float = 1.04f,
+        perfectTolerancePx: Float = 6f,
         config: AutoPlayer.Config = AutoPlayer.Config()
     ) {
         private val ms = 1_000_000L
         val frameNs = 8_333_333L
-        val sim = GameSim(1080, 2340, blockWidth = 604.8f, blockHeight = 90.7f).apply {
+        val sim = GameSim(1080, 2340, blockWidth = 604.8f, blockHeight = 90.7f, perfectTolerancePx = perfectTolerancePx).apply {
             baseSpeedPxPerSec = baseSpeed
             speedGrowthPerBlock = growth
         }
@@ -85,7 +89,10 @@ class AutoPlayerTest {
                 if (plannedFireNs in 1..(nowNs + frameNs)) {
                     val fireAt = maxOf(plannedFireNs, nowNs)
                     plannedFireNs = -1L
-                    val jitter = (random.nextDouble() * 2 - 1) * latencyJitterMs
+                    var jitter = (random.nextDouble() * 2 - 1) * latencyJitterMs
+                    if (random.nextDouble() < outlierChance) {
+                        jitter += if (random.nextBoolean()) outlierMs else -outlierMs
+                    }
                     pendingTouchNs = fireAt + ((inputLatencyMs + jitter) * ms).toLong()
                     player.onTapFired(fireAt, fireAt)
                 }
@@ -200,6 +207,44 @@ class AutoPlayerTest {
         val perfect = tail.count { abs(it) <= 6f }
         println("adapt: lead=${loop.player.leadNs / 1e6} bias=${loop.player.timeBiasNs / 1e6} tail perfect=$perfect/${tail.size}")
         assertTrue("tail perfect=$perfect/${tail.size}", perfect >= tail.size * 85 / 100)
+    }
+
+    /**
+     * Haqiqiy o'yin (211356): tezlik ~1300 px/s da, perfect chegarasi ~20 px,
+     * bosish esa vaqti-vaqti bilan ±2 kadrga adashadi (ishorasi tasodifiy).
+     * Bunday yakka xatolar lead'ni kadrlab surmasligi kerak — eski usulda lead
+     * 12 dan 37 ms gacha «sayr» qilib, erta tushishlarni o'zi keltirardi.
+     */
+    @Test
+    fun sporadicFrameSlipsDoNotWalkTheLead() {
+        val loop = Loop(
+            inputLatencyMs = 12.0,
+            latencyJitterMs = 2.0,
+            outlierChance = 0.06,
+            outlierMs = 17.0,
+            baseSpeed = 1300f,
+            growth = 1f,
+            perfectTolerancePx = 16f
+        )
+        val startLead = loop.player.leadNs
+        var minLead = startLead
+        var maxLead = startLead
+        loop.player.scan(0L)
+        loop.run(1.0)
+        loop.player.start(loop.nowNs)
+        repeat(240) {
+            loop.run(0.5)
+            minLead = minOf(minLead, loop.player.leadNs)
+            maxLead = maxOf(maxLead, loop.player.leadNs)
+        }
+        val imperfect = loop.offsets.count { abs(it) > 16f }
+        println(
+            "slips: placements=${loop.offsets.size} imperfect=$imperfect " +
+                "lead=${minLead / 1e6}..${maxLead / 1e6} ms"
+        )
+        assertTrue("placements=${loop.offsets.size}", loop.offsets.size >= 150)
+        assertTrue("lead=${minLead / 1e6}..${maxLead / 1e6}", maxLead - minLead <= 10 * ms)
+        assertTrue("imperfect=$imperfect/${loop.offsets.size}", imperfect <= loop.offsets.size * 6 / 100)
     }
 
     /** O'yin tugadi: maydon yo'qoladi — qayta skanerlash, «Boshlash» o'chadi. */

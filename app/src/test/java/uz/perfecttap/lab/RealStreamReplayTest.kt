@@ -27,11 +27,17 @@ class RealStreamReplayTest {
         var leg = -1
     }
 
-    private class Leg(val crossingNs: Double)
+    private class Leg(val crossingNs: Double, val speed: Double)
 
-    @Test
-    fun scheduledCrossingsMatchTheWholeLegFit() {
-        val stream = javaClass.classLoader!!.getResourceAsStream("replay-194525.csv")
+    private class Replay(val errorsMs: List<Double>, val speedErrors: List<Double>) {
+        val big = errorsMs.count { abs(it) > 10.0 }
+        val p90: Double = errorsMs.map { abs(it) }.sorted().let { it[(it.size * 9) / 10] }
+        /** Tezlik bahosi oyoq haqiqatidan 3% dan ko'p farq qilgan rejalar. */
+        val badSpeed = speedErrors.count { abs(it) > 0.03 }
+    }
+
+    private fun replay(resource: String): Replay {
+        val stream = javaClass.classLoader!!.getResourceAsStream(resource)
         val frames = ArrayList<Frame>()
         val taps = ArrayList<Long>()
         stream.bufferedReader().useLines { lines ->
@@ -52,8 +58,14 @@ class RealStreamReplayTest {
         }
         val legs = buildTruth(frames, taps)
 
-        val placer = AutoPlacer(cooldownNs = 120_000_000L, learnPlayfield = true, minLegSamples = 5)
+        val placer = AutoPlacer(
+            cooldownNs = 120_000_000L,
+            learnPlayfield = true,
+            minLegSamples = 5,
+            speedPrior = true
+        )
         val errorsMs = ArrayList<Double>()
+        val speedErrors = ArrayList<Double>()
         var tapIndex = 0
         for (f in frames) {
             while (tapIndex < taps.size && taps[tapIndex] <= f.tNs) {
@@ -71,17 +83,40 @@ class RealStreamReplayTest {
                 screenWidthPx = 1080f
             )
             if (d.scheduleInNs < 0L || d.throughBounce || f.leg < 0) continue
-            errorsMs.add((f.tNs + d.scheduleInNs - legs[f.leg].crossingNs) / 1e6)
+            val leg = legs[f.leg]
+            errorsMs.add((f.tNs + d.scheduleInNs - leg.crossingNs) / 1e6)
+            speedErrors.add((d.speedPxPerSec - leg.speed) / leg.speed)
         }
+        val r = Replay(errorsMs, speedErrors)
+        println(
+            "replay $resource: scheduled=${errorsMs.size} |err|>10ms=${r.big} " +
+                "p90=${"%.2f".format(r.p90)} ms speed>3%=${r.badSpeed}"
+        )
+        return r
+    }
 
-        val big = errorsMs.count { abs(it) > 10.0 }
-        val sorted = errorsMs.map { abs(it) }.sorted()
-        val p90 = sorted[(sorted.size * 9) / 10]
-        println("replay: scheduled=${errorsMs.size} |err|>10ms=$big p90=${"%.2f".format(p90)} ms")
-        assertTrue("juda kam reja: ${errorsMs.size}", errorsMs.size >= 50)
+    @Test
+    fun scheduledCrossingsMatchTheWholeLegFit() {
+        val r = replay("replay-194525.csv")
+        assertTrue("juda kam reja: ${r.errorsMs.size}", r.errorsMs.size >= 50)
         // Eski usul (6 namuna, oxirgi kadrdan) shu oqimda ~16% ni 10 ms dan ortiq adashardi.
-        assertTrue("|err|>10ms: $big/${errorsMs.size}", big <= errorsMs.size * 3 / 100)
-        assertTrue("p90=$p90", p90 <= 4.0)
+        assertTrue("|err|>10ms: ${r.big}/${r.errorsMs.size}", r.big <= r.errorsMs.size * 3 / 100)
+        assertTrue("p90=${r.p90}", r.p90 <= 4.0)
+    }
+
+    /**
+     * 211356 (v0.6.7): stack 648 px dan 38 px gacha toraygan uzun sessiya. Qisqa
+     * oyoqdagi tezlik bahosi ba'zan 8..24% adashardi (1300 o'rniga 834 px/s) va
+     * o'sha tap 91 px ga tushgan; oldingi blok tezligi tayanchi buni yo'qotadi.
+     */
+    @Test
+    fun narrowingStackSessionKeepsPredictionsTight() {
+        val r = replay("replay-211356.csv")
+        val worstSpeed = r.speedErrors.maxOf { abs(it) }
+        assertTrue("juda kam reja: ${r.errorsMs.size}", r.errorsMs.size >= 400)
+        assertTrue("|err|>10ms: ${r.big}/${r.errorsMs.size}", r.big <= r.errorsMs.size / 100)
+        assertTrue("p90=${r.p90}", r.p90 <= 2.0)
+        assertTrue("worst speed error=$worstSpeed", worstSpeed <= 0.07)
     }
 
     /**
@@ -145,7 +180,7 @@ class RealStreamReplayTest {
         val stack = median(leg.map { ((it.stackLeft + it.stackRight) * 0.5f).toDouble() })
         val crossingNs = t0 + (stack - a) / v * 1e9
         if (crossingNs < leg.first().tNs || crossingNs > leg.last().tNs) return
-        legs.add(Leg(crossingNs))
+        legs.add(Leg(crossingNs, v))
         for (f in leg) f.leg = legs.size - 1
     }
 

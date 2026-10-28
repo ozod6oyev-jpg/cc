@@ -31,7 +31,14 @@ class AutoPlacer(
      * 25 ms gacha orqada qoladi: 12+ namunada bashorat xatosi >10 ms bo'lishi
      * ~1% ga tushadi (194525 sessiyasi qayta o'ynatilganda), 4-8 namunada 4-9%.
      */
-    private val minLegSamples: Int = 0
+    private val minLegSamples: Int = 0,
+    /**
+     * Haqiqiy o'yinda blok tezligi bloklar orasida faqat biroz o'sadi (211356:
+     * har blokda +1.5..3%, keyin ~1297 px/s da to'xtaydi). true bo'lsa, yangi
+     * blok tezligi oldingi blok tezligi atrofida ushlanadi: qisqa oyoqdagi
+     * adashgan baho (211356: 1300 o'rniga 834 px/s) tapni 100 px ga surmaydi.
+     */
+    private val speedPrior: Boolean = false
 ) {
 
     /** [scheduleInNs] — qo'yishni shu vaqtdan keyin bajarish kerak (-1 = yo'q). */
@@ -77,6 +84,8 @@ class AutoPlacer(
     private val residuals = FloatArray(LEG_WINDOW)
     /** Tezlik kattaligi shu blok uchun to'liq oyna bo'yicha o'lchangan. */
     private var speedKnown = false
+    /** Oldingi blokning qo'yish paytidagi tezlik kattaligi ([speedPrior]; 0 = noma'lum). */
+    private var priorSpeed = 0f
     /** Joriy harakat yo'nalishi (+1 / -1; 0 = hali noma'lum). */
     private var legDirection = 0
     private var observations = 0
@@ -110,6 +119,7 @@ class AutoPlacer(
         samplesBlockedThisLeg = false
         anchorX = Float.NaN
         speedKnown = false
+        priorSpeed = 0f
         legDirection = 0
         observations = 0
         lastPlaceArrivalNs = Long.MIN_VALUE / 2
@@ -299,7 +309,7 @@ class AutoPlacer(
         if (sampleCount >= ownFitSamples) {
             val fit = theilSenVelocity()
             if (fit != 0f) {
-                speedPxPerSec = fit
+                speedPxPerSec = constrainToPrior(fit)
                 speedKnown = true
             }
         }
@@ -316,6 +326,22 @@ class AutoPlacer(
         sampleSkips >= 2 -> 0
         sampleSkips >= 1 -> minOf(minLegSamples, SAMPLES)
         else -> minLegSamples
+    }
+
+    /**
+     * Tezlik kattaligini oldingi blok tezligi oynasiga ([PRIOR_MIN_RATIO],
+     * [PRIOR_MAX_RATIO]) qisadi. Ko'p namunali baho undan juda uzoq bo'lsa —
+     * tezlik haqiqatan o'zgargan (yangi o'yin), baho o'zgarishsiz olinadi.
+     */
+    private fun constrainToPrior(fit: Float): Float {
+        val prior = priorSpeed
+        if (prior <= 0f) return fit
+        val magnitude = abs(fit)
+        if (sampleCount >= PRIOR_ESCAPE_SAMPLES &&
+            (magnitude < prior * PRIOR_ESCAPE_LOW || magnitude > prior * PRIOR_ESCAPE_HIGH)
+        ) return fit
+        val clamped = magnitude.coerceIn(prior * PRIOR_MIN_RATIO, prior * PRIOR_MAX_RATIO)
+        return if (fit < 0f) -clamped else clamped
     }
 
     /** Juft qiyaliklar medianasi (px/s); juftlar kamida [MIN_PAIR_DT_NS] oraliqda. */
@@ -364,6 +390,8 @@ class AutoPlacer(
      * own time (content clock); frames showing the scene before it are ignored.
      */
     fun onPlaced(arrivalNs: Long, placedAtNs: Long = arrivalNs) {
+        // Qo'yish paytidagi tezlik — tap shu bilan rejalashtirilgan.
+        if (speedPrior && speedKnown) priorSpeed = abs(speedPxPerSec)
         placedOnce = true
         lastPlaceArrivalNs = arrivalNs
         ignoreContentBeforeNs = placedAtNs
@@ -411,5 +439,12 @@ class AutoPlacer(
         private const val MIN_FIT_SAMPLES = 3
         /** Yo'nalish almashinuvi shovqin emas, deb hisoblanadigan siljish. */
         private const val BOUNCE_MIN_PX = 2f
+        /** Yangi blok tezligi oldingisiga nisbatan shu oynada (o'sish ≤ 3%/blok). */
+        private const val PRIOR_MIN_RATIO = 0.97f
+        private const val PRIOR_MAX_RATIO = 1.05f
+        /** Shuncha namunali baho [PRIOR_ESCAPE_LOW]..[PRIOR_ESCAPE_HIGH] dan tashqarida — yangi tezlik. */
+        private const val PRIOR_ESCAPE_SAMPLES = 12
+        private const val PRIOR_ESCAPE_LOW = 0.85f
+        private const val PRIOR_ESCAPE_HIGH = 1.15f
     }
 }

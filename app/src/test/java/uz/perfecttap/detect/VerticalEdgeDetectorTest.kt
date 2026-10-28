@@ -170,4 +170,39 @@ class VerticalEdgeDetectorTest {
         detector.maxJumpRows = 86f * 1.5f / rowStep
         assertEquals(233f, detector.detect(pixels)!!.topRow, 0.5f)
     }
+
+    /**
+     * Haqiqiy o'yin (211356): stack 38 px ga torayganda harakatlanuvchi blok
+     * tasma ustunida yolg'iz — tagida blok yo'q. Kuzatuvda (kutilgan joy
+     * ma'lum) u baribir olinishi kerak, aks holda tasma kamera surilishiga
+     * ergashmaydi; pastroqdagi keng stack bloklari esa olinmaydi.
+     */
+    @Test
+    fun trackedBlockWithoutAStackBelowIsStillFound() {
+        val rows = 500
+        val pixels = strip(rows) { r ->
+            when (r) {
+                in 240 until 281 -> 200 // harakatlanuvchi blok, kamera bilan surilgan
+                in 326 until 367 -> 230 // ancha pastdagi keng stack bloklari
+                in 369 until 410 -> 230
+                else -> 0
+            }
+        }
+        val detector = VerticalEdgeDetector(stripWidth, rowStep, rows, requireBlockBelow = true)
+        detector.expectedHeightPx = 82f
+        detector.expectedPitchPx = 86f
+        detector.maxJumpRows = 86f * 1.5f / rowStep
+        // Kuzatuvsiz: tagida blok turgan eng yuqori bo'lak (stack).
+        assertEquals(326f, detector.detect(pixels)!!.topRow, 0.5f)
+
+        // Blok oldingi kadrda 6 px yuqorida edi.
+        detector.expectedCenterRow = 257.5f
+        val result = detector.detect(pixels)!!
+        assertEquals(240f, result.topRow, 0.5f)
+        assertEquals(86f, result.pitchPx, 0.5f)
+
+        // Kutilgan joydan bir qadam uzoqda yolg'iz bo'lak — kuzatuv emas.
+        detector.expectedCenterRow = 217.5f
+        assertNull(detector.detect(pixels))
+    }
 }

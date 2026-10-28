@@ -352,8 +352,8 @@ class CaptureService : Service() {
             // buffers then become inaccessible and must not be read.
             if (!active) return
             val plane = image.planes.firstOrNull() ?: return
-            CaptureBus.takeSnapshotRequest()?.let { file ->
-                saveSnapshot(plane, image.width, image.height, file)
+            CaptureBus.takeSnapshotRequest()?.let { request ->
+                saveSnapshot(plane, image.width, image.height, request)
             }
             val slice = scanline ?: return
             // 1) Y tracking: locate the moving block in a vertical strip placed at
@@ -573,7 +573,12 @@ class CaptureService : Service() {
      * Piksellar shu oqimda nusxalanadi (bufer kadrdan keyin yopiladi),
      * siqish esa alohida oqimda.
      */
-    private fun saveSnapshot(plane: android.media.Image.Plane, width: Int, height: Int, file: java.io.File) {
+    private fun saveSnapshot(
+        plane: android.media.Image.Plane,
+        width: Int,
+        height: Int,
+        request: CaptureBus.SnapshotRequest
+    ) {
         val buffer = plane.buffer
         val rowStride = plane.rowStride
         val pixelStride = plane.pixelStride
@@ -590,16 +595,18 @@ class CaptureService : Service() {
                     ((p and 0xFF) shl 16) or ((p ushr 16) and 0xFF)
             }
         }
+        runCatching { request.onCaptured() }
         Thread({
-            runCatching {
+            val saved = runCatching {
                 val bitmap = android.graphics.Bitmap.createBitmap(
                     argb, width, height, android.graphics.Bitmap.Config.ARGB_8888
                 )
-                file.outputStream().use {
+                request.file.outputStream().use {
                     bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
                 }
                 bitmap.recycle()
-            }.onFailure { Log.w(TAG, "snapshot failed", it) }
+            }.onFailure { Log.w(TAG, "snapshot failed", it) }.isSuccess
+            runCatching { request.onSaved(saved) }
         }, "pt-snapshot").start()
     }
 

@@ -101,6 +101,10 @@
     <string name="overlay_no_capture">Ekran oqimi ishlamayapti — ilovadan panelni qayta oching</string>
     <string name="overlay_no_channel">Bosish kanali yo‘q: root yoki Shizuku kerak</string>
     <string name="overlay_opening_channel">Bosish kanali ochilmoqda…</string>
+    <string name="overlay_mode_normal">Rejim: oddiy (ekran markaziga)</string>
+    <string name="overlay_mode_test">Rejim: test · %1$d blok / %2$d daq · tasodifiy joy</string>
+    <string name="overlay_test_progress">\nTest: %1$d/%2$d · qoldi %3$d:%4$02d · keyingi tapgacha %5$.1f s</string>
+    <string name="overlay_test_done">✓ Test tugadi: %1$d blok, %2$d:%3$02d da</string>
     <string name="overlay_counters">Bloklar: %1$d · perfect: %2$d · xato: %3$d\nTezlik: %4$.0f px/s · lead: %5$.1f ms</string>
     <string name="overlay_permission_needed">Panel uchun «boshqa ilovalar ustida ko‘rsatish» ruxsatini bering, so‘ng tugmani qayta bosing</string>
     <string name="session_none">Saqlanadigan sessiya yo‘q</string>

@@ -341,10 +341,13 @@ class MainActivity : AppCompatActivity() {
                         ?.listFiles { f -> f.name.startsWith("$base-frame-") && f.extension == "png" }
                         .orEmpty()
                         .sortedBy { it.name }
+                    // Avto sessiyaning 5 daqiqalik rasmlari o'z papkasi bilan.
+                    val deltaDir = File(file.parentFile, "$base-${OverlayService.DELTA_PREFIX}")
+                    val deltas = OverlayService.deltaShots(deltaDir).map { "${deltaDir.name}/${it.name}" to it }
                     val out = contentResolver.openOutputStream(uri) ?: error("fayl ochilmadi")
                     ZipOutputStream(out).use { zip ->
-                        for (entry in listOf(file) + frames) {
-                            zip.putNextEntry(ZipEntry(entry.name))
+                        for ((name, entry) in (listOf(file) + frames).map { it.name to it } + deltas) {
+                            zip.putNextEntry(ZipEntry(name))
                             entry.inputStream().use { it.copyTo(zip) }
                             zip.closeEntry()
                         }

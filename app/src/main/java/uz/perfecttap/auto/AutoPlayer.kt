@@ -173,12 +173,16 @@ class AutoPlayer(private val config: Config = Config()) {
         get() = when {
             state != State.RUNNING -> state.name.lowercase()
             untrackedNotice -> REASON_UNTRACKED
+            heldForPacing -> REASON_PACING
             skippedForFrame -> REASON_FRAME_MISALIGNED
             skippedForBounce -> REASON_THROUGH_BOUNCE
             else -> placer.lastReason
         }
     private var skippedForFrame = false
     private var skippedForBounce = false
+    private var heldForPacing = false
+    /** Ritm ([SessionPacer]): tap shundan oldin yuborilmaydi (0 = cheklov yo'q). */
+    private var holdUntilNs = 0L
     private var lastFramePeriodNs = 0L
     /** Mos kadr kutila boshlagan payt (0 = kutilmayapti) va eng yaxshi xato. */
     private var frameWaitSinceNs = 0L
@@ -253,9 +257,18 @@ class AutoPlayer(private val config: Config = Config()) {
         pendingResult = false
     }
 
+    /**
+     * Keyingi tap [untilNs] dan oldin ketmaydi (0 = darhol). Blok kuzatilishda
+     * davom etadi; kutish tugagach u perfect zonaga kelgan birinchi o'tishda bosiladi.
+     */
+    fun holdUntil(untilNs: Long) {
+        holdUntilNs = untilNs
+    }
+
     /** «Boshlash»: faqat maydon topilib, qizib olingandan keyin. */
     fun start(nowNs: Long): Boolean {
         if (state != State.READY) return false
+        holdUntilNs = 0L
         taps = 0
         perfectCount = 0
         imperfectCount = 0
@@ -381,6 +394,7 @@ class AutoPlayer(private val config: Config = Config()) {
         val decision = feedPlacer(left, right, width, hasStack, stackLeft, stackRight, imageTimestampNs, nowNs, screenWidthPx)
         skippedForFrame = false
         skippedForBounce = false
+        heldForPacing = false
         if (framePeriodNs > 0L) lastFramePeriodNs = framePeriodNs
         if (state != State.RUNNING || decision.scheduleInNs < 0L) return -1L
         if (decision.throughBounce) {
@@ -395,6 +409,13 @@ class AutoPlayer(private val config: Config = Config()) {
             vsyncNs + frames * framePeriodNs
         } else {
             crossingNs
+        }
+        if (targetNs - leadNs < holdUntilNs) {
+            // Ritm bo'yicha hali erta: bu o'tish o'tkaziladi, mos kadr kutilishi
+            // esa kutish tugagandan keyin boshlanadi.
+            heldForPacing = true
+            frameWaitSinceNs = 0L
+            return -1L
         }
         val frameErrorPx = abs(placer.speedPxPerSec) * abs(targetNs - crossingNs) / 1_000_000_000f
         if (frameWaitSinceNs == 0L) {
@@ -464,6 +485,8 @@ class AutoPlayer(private val config: Config = Config()) {
         const val CANCEL = -2L
         /** Bashorat chetdan qaytish orqali — qaytishdan keyingi kadr kutiladi. */
         const val REASON_THROUGH_BOUNCE = "qaytish_ichida"
+        /** Ritm bo'yicha keyingi tap vaqti hali kelmagan ([holdUntil]). */
+        const val REASON_PACING = "ritm_kutish"
     }
 
     private fun onScanFrame(seen: Boolean, center: Float, stackCenter: Float, nowNs: Long) {

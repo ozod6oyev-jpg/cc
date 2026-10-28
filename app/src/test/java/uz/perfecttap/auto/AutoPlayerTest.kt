@@ -247,6 +247,24 @@ class AutoPlayerTest {
         assertTrue("imperfect=$imperfect/${loop.offsets.size}", imperfect <= loop.offsets.size * 6 / 100)
     }
 
+    /** Ritm kutishi: [AutoPlayer.holdUntil] gacha tap yo'q, keyin birinchi o'tishda. */
+    @Test
+    fun holdDelaysTheNextTapUntilItEnds() {
+        val loop = Loop(inputLatencyMs = 8.0, baseSpeed = 1300f, growth = 1f)
+        loop.player.scan(0L)
+        loop.run(1.0)
+        loop.player.start(loop.nowNs)
+        val holdEnd = loop.nowNs + 3_000 * ms
+        loop.player.holdUntil(holdEnd)
+        loop.run(2.9)
+        assertEquals(0, loop.player.taps)
+        while (loop.player.taps == 0 && loop.nowNs < holdEnd + 2_000 * ms) loop.run(0.01)
+        assertEquals(1, loop.player.taps)
+        assertTrue("tap ${(loop.nowNs - holdEnd) / 1e6} ms", loop.nowNs >= holdEnd && loop.nowNs < holdEnd + 1_200 * ms)
+        loop.run(0.2)
+        assertTrue("perfect: ${loop.offsets}", abs(loop.offsets.first()) <= 6f)
+    }
+
     /** O'yin tugadi: maydon yo'qoladi — qayta skanerlash, «Boshlash» o'chadi. */
     @Test
     fun rescansWhenTheFieldDisappears() {

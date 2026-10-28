@@ -79,15 +79,31 @@ object CaptureBus {
         labFrames.trySend(observation)
     }
 
-    /** Keyingi kadr shu faylga PNG bo'lib saqlansin (diagnostika). */
-    private val snapshotRequest = java.util.concurrent.atomic.AtomicReference<java.io.File?>(null)
+    /**
+     * Kadrni PNG qilib saqlash so'rovi. [onCaptured] — piksellar nusxalandi
+     * (kadr oqimida; shundan keyin ekranni o'zgartirish rasmga ta'sir qilmaydi),
+     * [onSaved] — fayl yozildi yoki yozilmadi (`pt-snapshot` oqimida).
+     */
+    class SnapshotRequest(
+        val file: java.io.File,
+        val onCaptured: () -> Unit = {},
+        val onSaved: (Boolean) -> Unit = {}
+    )
 
-    fun requestSnapshot(file: java.io.File) {
-        snapshotRequest.set(file)
+    /** Keyingi kadr shu faylga PNG bo'lib saqlansin. */
+    private val snapshotRequest = java.util.concurrent.atomic.AtomicReference<SnapshotRequest?>(null)
+
+    fun requestSnapshot(
+        file: java.io.File,
+        onCaptured: () -> Unit = {},
+        onSaved: (Boolean) -> Unit = {}
+    ) {
+        // Almashtirilgan (hali olinmagan) so'rov bajarilmaydi — kutayotgan bo'lsa xabar topsin.
+        snapshotRequest.getAndSet(SnapshotRequest(file, onCaptured, onSaved))?.onSaved?.invoke(false)
     }
 
     /** Kadr oqimidan chaqiriladi; so'rov bo'lsa uni oladi. */
-    fun takeSnapshotRequest(): java.io.File? = snapshotRequest.getAndSet(null)
+    fun takeSnapshotRequest(): SnapshotRequest? = snapshotRequest.getAndSet(null)
 
     /** Rejim o'chganda eski kadrlar navbatda qolib ketmasin. */
     fun clearLabFrames() {
